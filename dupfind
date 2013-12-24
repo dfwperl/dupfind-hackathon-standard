@@ -1,0 +1,243 @@
+#!/usr/bin/env perl
+
+use 5.010;
+
+use warnings;
+use strict;
+
+use File::Util;
+use Digest::xxHash 'xxhash_hex';
+use Getopt::Long;
+use Term::Prompt 'prompt';
+use Benchmark ':hireswallclock';
+
+my $opts =
+{
+   dir      => undef,
+   help     => undef,
+   bytes    => 1024 ** 3, # 1 GB max read
+   maxdepth => 10,
+   prompt   => 0,
+   remove   => 0,
+   links    => 0,
+};
+
+GetOptions
+(
+   'dir|d=s'      => \$opts->{dir},
+   'bytes|b=s'    => \$opts->{bytes},
+   'maxdepth|m=s' => \$opts->{maxdepth},
+   'links|l=s'    => \$opts->{links},
+   'prompt|p'     => \$opts->{prompt},
+   'remove|r'     => \$opts->{remove},
+   'delete'       => \$opts->{remove}, # <-- that's not a typo
+   'help|h|?'     => \$opts->{help},
+) or die usage();
+
+die usage() unless defined $opts->{dir};
+
+$opts->{remove}++ if $opts->{prompt};
+
+my $ftl = File::Util->new
+(
+   {
+      use_flock   => 0,
+      read_limit  => $opts->{bytes},
+      abort_depth => $opts->{maxdepth},
+   }
+);
+
+
+my ( $cmpcount, $runtime, $deltime ) = run();
+
+say "** TOTAL SCANNED FILES: $cmpcount";
+say '** SCAN TIME: ' . timestr $runtime;
+say '** DELETION TIME: ' . timestr $deltime if $opts->{remove};
+
+exit;
+
+
+
+sub run
+{
+   my $start_of_scan = Benchmark->new();
+
+   my ( $sizes, $cmpcount ) = get_dup_sizes();
+
+   exit unless keys %$sizes;
+
+   my $hashes = get_dup_hashes( $sizes );
+
+   undef $sizes;
+
+   exit unless keys %$hashes;
+
+   my $end_of_scan = Benchmark->new();
+
+   show_dups( $hashes );
+
+   delete_dups( $hashes ) if $opts->{remove};
+
+   my $end_of_del = Benchmark->new();
+
+   return $cmpcount,
+          timediff( $end_of_scan, $start_of_scan ),
+          timediff( $end_of_del, $end_of_scan );
+}
+
+sub get_dup_sizes
+{
+   my ( $sizes, $cmpcount ) = ( {}, 0 );
+
+   $ftl->list_dir
+   (
+      $opts->{dir} =>
+      {
+         recurse => 1,
+         callback => sub
+            {
+               my ( $selfdir, $subdirs, $files ) = @_;
+
+               push @{ $sizes->{ -s $_ } }, $_ for @$files;
+            }
+      }
+   );
+
+   $cmpcount = keys %$sizes;
+
+   delete $sizes->{ $_ }
+      for grep { @{ $sizes->{ $_ } } == 1 }
+      keys %$sizes;
+
+   return $sizes, $cmpcount;
+}
+
+sub get_dup_hashes
+{
+   my $sizes  = shift;
+   my $hashes = {};
+
+   for my $size ( keys %$sizes )
+   {
+      my $group = $sizes->{ $size };
+
+      for my $file ( @$group )
+      {
+         my $hash = xxhash_hex $ftl->load_file( $file ), 0;
+
+         push @{ $hashes->{ $hash } }, $file
+      }
+   }
+
+   delete $hashes->{ $_ }
+      for grep { @{ $hashes->{ $_ } } == 1 }
+      keys %$hashes;
+
+   return $hashes;
+}
+
+sub show_dups
+{
+   my $hashes = shift;
+
+   for my $hash ( keys %$hashes )
+   {
+      my $group = $hashes->{ $hash };
+
+      say sprintf 'DUPLICATES (hash: %s | size: %db)', $hash, -s $$group[0];
+
+      say "   $_" for @$group;
+
+      say '--';
+   }
+}
+
+sub delete_dups
+{
+   my $hashes  = shift;
+
+   my $removed = 0;
+
+   for my $hash ( keys %$hashes )
+   {
+      my $group = $hashes->{ $hash };
+
+      say sprintf 'KEPT    (%s) %s', $hash, $group->[0];
+
+      shift @$group;
+
+      for my $dup ( @$group )
+      {
+         if ( $opts->{prompt} )
+         {
+            unless ( prompt 'y', "REMOVE DUPLICATE? $dup", '', 'n' )
+            {
+               say sprintf 'KEPT    (%s) %s', $hash, $dup;
+
+               next;
+            }
+         }
+
+         unlink $dup or warn "COULD NOT REMOVE $dup!  $!" and next;
+
+         $removed++;
+
+         say sprintf 'REMOVED (%s) %s', $hash, $dup;
+      }
+
+      say '--';
+   }
+
+   say "** TOTAL DUPLICATE FILES REMOVED: $removed"
+}
+
+# This is just the help message:
+
+sub usage { <<'__USAGE__' }
+USAGE:
+   dupfind [ --options ] --dir ./path/to/search/
+
+DESCRIPTION:
+   finds duplicate files in a directory tree.  Options are explained
+   in detail below.  Options marked with an asterisk (*) are not yet
+   implemented and are planned for a future release
+
+ARGUMENTS AND FLAGS:
+   -b, --bytes    Maximum size in bytes that you are willing to compare.
+                  The current default maximum is 1 gigabyte.
+
+                  Sizing guide:
+                     1 kilobyte = 1024
+                     1 megabyte = 1048576        or 1024 ** 2
+                     1 gigabyte = 1073741824     or 1024 ** 3
+                     1 terabyte = 1099511627776  or 1024 ** 4
+
+   -d, --dir      Name of the directory you want to search for duplicates
+
+*  -l, --links    Follow symlinks (by default it does not).  Because this
+                  has some safety implications and is a complex matter,
+                  it is not yet supported.  Sorry, check back later.
+
+   -m, --maxdepth The maximum directory depth to which the comparison
+                  scan will recurse.  Note that this does not mean the
+                  total number of directories to scan
+
+   -p, --prompt   Interactively prompt user to delete detected duplicates
+
+   -r, --remove   Delete (WITHOUT PROMPTING) all but the first copy if
+                  duplicate files are found.  This will leave you with no
+                  duplicate files when execution is finished
+
+*  -s, --save     Name of the file in which you want to save the scan results
+                  for quick retrieval later.  It will be stored in a binary
+                  format that is understood only by this program.  Work in
+                  progress, not implemented yet
+
+*  -u, --unsave   Name of a file which was previously created by calling this
+                  program with the --save option.  Doing this retrieves the
+                  results from the previously saved scan and displays them
+                  on your screen, or prompts you to delete duplicates if you
+                  use this with the --prompt option.  You can also use it
+                  with the --remove option.  Work in progress, not implemented
+
+__USAGE__
