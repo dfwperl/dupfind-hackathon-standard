@@ -1,0 +1,349 @@
+#!/usr/bin/env perl
+
+=pod
+
+=head1 THREADED VERSION OF DUPFIND
+
+...which seems to have memory issues, but at double the speed or
+more for large datasets.
+
+=cut
+
+use 5.010;
+
+use warnings;
+use strict;
+
+use threads;
+use threads::shared;
+use Thread::Queue;
+
+my $hashes = &share( {} );
+
+use File::Util;
+use Digest::xxHash 'xxhash_hex';
+use Getopt::Long;
+use Term::Prompt 'prompt';
+use Benchmark ':hireswallclock';
+
+my $opts =
+{
+   dir      => undef,
+   help     => undef,
+   bytes    => 1024 ** 3, # 1 GB max read
+   maxdepth => 10,
+   prompt   => 0,
+   remove   => 0,
+   links    => 0,
+   threads  => 10,
+};
+
+GetOptions
+(
+   'dir|d=s'      => \$opts->{dir},
+   'bytes|b=s'    => \$opts->{bytes},
+   'maxdepth|m=s' => \$opts->{maxdepth},
+   'links|l=s'    => \$opts->{links},
+   'prompt|p'     => \$opts->{prompt},
+   'remove|r'     => \$opts->{remove},
+   'delete'       => \$opts->{remove}, # <-- that's not a typo
+   'help|h|?'     => \$opts->{help},
+   'threads|t=s'  => \$opts->{threads},
+) or die usage();
+
+die usage() unless defined $opts->{dir};
+
+$opts->{remove}++  if $opts->{prompt};
+$opts->{threads}++ unless $opts->{threads};
+
+my $pool_queue     = Thread::Queue->new;
+my $worker_queues  = {};
+my $thread_term    :shared = 0;
+
+my $ftl = File::Util->new
+(
+   {
+      use_flock   => 0,
+      read_limit  => $opts->{bytes},
+      abort_depth => $opts->{maxdepth},
+   }
+);
+
+$SIG{TERM} = $SIG{INT} = \&end_wait_thread_pool;
+
+my ( $cmp_count, $dup_count, $run_time, $del_time ) = run();
+
+$run_time = timestr $run_time;
+$del_time = $opts->{remove} ? timestr $del_time : 0;
+
+say <<__SUMMARY__;
+** TOTAL SCANNED: $cmp_count
+** TOTAL DUPES:   $dup_count
+** SCAN TIME:     $run_time
+** DELETION TIME: $del_time
+__SUMMARY__
+
+exit;
+
+
+
+sub run
+{
+   my $start_of_scan = Benchmark->new();
+
+   my ( $sizes, $cmp_count ) = get_dup_sizes();
+
+   exit unless keys %$sizes;
+
+   my $hashes = get_dup_hashes( $sizes );
+
+   undef $sizes;
+
+   exit unless keys %$hashes;
+
+   my $end_of_scan = Benchmark->new();
+
+   my $dup_count   = show_dups( $hashes );
+
+   delete_dups( $hashes ) if $opts->{remove};
+
+   my $end_of_del = Benchmark->new();
+
+   return $cmp_count,
+          $dup_count,
+          timediff( $end_of_scan, $start_of_scan ),
+          timediff( $end_of_del, $end_of_scan );
+}
+
+sub create_thread_pool
+{
+   for ( 1 .. $opts->{threads} )
+   {
+      my $thread_queue  = Thread::Queue->new;
+
+      my $worker_thread = threads->create( worker => $thread_queue );
+
+      $worker_queues->{ $worker_thread->tid } = $thread_queue;
+   }
+}
+
+sub end_wait_thread_pool
+{
+   $thread_term++;
+
+   $worker_queues->{ $_ }->end for keys %$worker_queues;
+
+   $pool_queue->end;
+
+   $_->join for threads->list;
+}
+
+sub worker
+{
+   my $work_queue = shift;
+   my $tid = threads->tid;
+
+   while ( !$thread_term )
+   {
+      #say "Thread $tid is idle";
+
+      # signal to the thread poolq that we are ready to work
+
+      $pool_queue->enqueue( $tid );
+
+      # wait for some filename to be put into my work queue
+
+      my $file = $work_queue->dequeue;
+
+      #say "Thread $tid ended" and
+         last unless defined $file;
+
+      #say "Thread $tid just got a hashing job: $file";
+
+      my $hash = xxhash_hex $ftl->load_file( $file ), 0;
+
+      my $arrayref = &share( [] );
+
+      lock $hashes;
+
+      $hashes->{ $hash } ||= $arrayref;
+
+      push @{ $hashes->{ $hash } }, $file;
+
+      #say "Thread $tid is done hashing: $file";
+   }
+}
+
+
+sub get_dup_sizes
+{
+   my ( $sizes, $cmp_count ) = ( {}, 0 );
+
+   $ftl->list_dir
+   (
+      $opts->{dir} =>
+      {
+         recurse => 1,
+         callback => sub
+            {
+               my ( $selfdir, $subdirs, $files ) = @_;
+
+               push @{ $sizes->{ -s $_ } }, $_ for @$files;
+            }
+      }
+   );
+
+   $cmp_count = keys %$sizes;
+
+   delete $sizes->{ $_ }
+      for grep { @{ $sizes->{ $_ } } == 1 }
+      keys %$sizes;
+
+   return $sizes, $cmp_count;
+}
+
+sub get_dup_hashes
+{
+   my $sizes  = shift;
+
+   create_thread_pool();
+
+   for my $size ( keys %$sizes )
+   {
+      my $group = $sizes->{ $size };
+
+      for my $file ( @$group )
+      {
+         my $tid = $pool_queue->dequeue;
+
+         last unless defined $tid;
+
+         $worker_queues->{ $tid }->enqueue( $file ) if !$thread_term;
+      }
+   }
+
+   # wait until all threads are no longer busy
+
+   #sleep 1 until $pool_queue->pending == $opts->{threads};
+
+   # ...tell the threads to exit, blocking wait
+
+   end_wait_thread_pool();
+
+   delete $hashes->{ $_ }
+      for grep { @{ $hashes->{ $_ } } == 1 }
+      keys %$hashes;
+
+   return $hashes;
+}
+
+sub show_dups
+{
+   my $hashes = shift;
+   my $dupes  = 0;
+
+   for my $hash ( keys %$hashes )
+   {
+      my $group = $hashes->{ $hash };
+
+      say sprintf 'DUPLICATES (hash: %s | size: %db)', $hash, -s $$group[0];
+
+      say "   $_" for @$group;
+
+      $dupes += @$group - 1;
+
+      say '--';
+   }
+
+   return $dupes
+}
+
+sub delete_dups
+{
+   my $hashes  = shift;
+
+   my $removed = 0;
+
+   for my $hash ( keys %$hashes )
+   {
+      my $group = $hashes->{ $hash };
+
+      say sprintf 'KEPT    (%s) %s', $hash, $group->[0];
+
+      shift @$group;
+
+      for my $dup ( @$group )
+      {
+         if ( $opts->{prompt} )
+         {
+            unless ( prompt 'y', "REMOVE DUPLICATE? $dup", '', 'n' )
+            {
+               say sprintf 'KEPT    (%s) %s', $hash, $dup;
+
+               next;
+            }
+         }
+
+         unlink $dup or warn "COULD NOT REMOVE $dup!  $!" and next;
+
+         $removed++;
+
+         say sprintf 'REMOVED (%s) %s', $hash, $dup;
+      }
+
+      say '--';
+   }
+
+   say "** TOTAL DUPLICATE FILES REMOVED: $removed"
+}
+
+# This is just the help message:
+
+sub usage { <<'__USAGE__' }
+USAGE:
+   dupfind [ --options ] --dir ./path/to/search/
+
+DESCRIPTION:
+   finds duplicate files in a directory tree.  Options are explained
+   in detail below.  Options marked with an asterisk (*) are not yet
+   implemented and are planned for a future release
+
+ARGUMENTS AND FLAGS:
+   -b, --bytes    Maximum size in bytes that you are willing to compare.
+                  The current default maximum is 1 gigabyte.
+
+                  Sizing guide:
+                     1 kilobyte = 1024
+                     1 megabyte = 1048576        or 1024 ** 2
+                     1 gigabyte = 1073741824     or 1024 ** 3
+                     1 terabyte = 1099511627776  or 1024 ** 4
+
+   -d, --dir      Name of the directory you want to search for duplicates
+
+*  -l, --links    Follow symlinks (by default it does not).  Because this
+                  has some safety implications and is a complex matter,
+                  it is not yet supported.  Sorry, check back later.
+
+   -m, --maxdepth The maximum directory depth to which the comparison
+                  scan will recurse.  Note that this does not mean the
+                  total number of directories to scan
+
+   -p, --prompt   Interactively prompt user to delete detected duplicates
+
+   -r, --remove   Delete (WITHOUT PROMPTING) all but the first copy if
+                  duplicate files are found.  This will leave you with no
+                  duplicate files when execution is finished
+
+*  -s, --save     Name of the file in which you want to save the scan results
+                  for quick retrieval later.  It will be stored in a binary
+                  format that is understood only by this program.  Work in
+                  progress, not implemented yet
+
+*  -u, --unsave   Name of a file which was previously created by calling this
+                  program with the --save option.  Doing this retrieves the
+                  results from the previously saved scan and displays them
+                  on your screen, or prompts you to delete duplicates if you
+                  use this with the --prompt option.  You can also use it
+                  with the --remove option.  Work in progress, not implemented
+
+__USAGE__
