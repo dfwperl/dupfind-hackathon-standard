@@ -48,11 +48,17 @@ my $ftl = File::Util->new
 );
 
 
-my ( $cmpcount, $runtime, $deltime ) = run();
+my ( $cmp_count, $dup_count, $run_time, $del_time ) = run();
 
-say "** TOTAL SCANNED FILES: $cmpcount";
-say '** SCAN TIME: ' . timestr $runtime;
-say '** DELETION TIME: ' . timestr $deltime if $opts->{remove};
+$run_time = timestr $run_time;
+$del_time = $opts->{remove} ? timestr $del_time : 0;
+
+say <<__SUMMARY__;
+** TOTAL SCANNED: $cmp_count
+** TOTAL DUPES:   $dup_count
+** SCAN TIME:     $run_time
+** DELETION TIME: $del_time
+__SUMMARY__
 
 exit;
 
@@ -62,7 +68,7 @@ sub run
 {
    my $start_of_scan = Benchmark->new();
 
-   my ( $sizes, $cmpcount ) = get_dup_sizes();
+   my ( $sizes, $cmp_count ) = get_dup_sizes();
 
    exit unless keys %$sizes;
 
@@ -74,20 +80,21 @@ sub run
 
    my $end_of_scan = Benchmark->new();
 
-   show_dups( $hashes );
+   my $dup_count   = show_dups( $hashes );
 
    delete_dups( $hashes ) if $opts->{remove};
 
    my $end_of_del = Benchmark->new();
 
-   return $cmpcount,
+   return $cmp_count,
+          $dup_count,
           timediff( $end_of_scan, $start_of_scan ),
           timediff( $end_of_del, $end_of_scan );
 }
 
 sub get_dup_sizes
 {
-   my ( $sizes, $cmpcount ) = ( {}, 0 );
+   my ( $sizes, $cmp_count ) = ( {}, 0 );
 
    $ftl->list_dir
    (
@@ -103,13 +110,13 @@ sub get_dup_sizes
       }
    );
 
-   $cmpcount = keys %$sizes;
+   $cmp_count = keys %$sizes;
 
    delete $sizes->{ $_ }
       for grep { @{ $sizes->{ $_ } } == 1 }
       keys %$sizes;
 
-   return $sizes, $cmpcount;
+   return $sizes, $cmp_count;
 }
 
 sub get_dup_hashes
@@ -139,6 +146,7 @@ sub get_dup_hashes
 sub show_dups
 {
    my $hashes = shift;
+   my $dupes  = 0;
 
    for my $hash ( keys %$hashes )
    {
@@ -148,8 +156,12 @@ sub show_dups
 
       say "   $_" for @$group;
 
+      $dupes += @$group - 1;
+
       say '--';
    }
+
+   return $dupes;
 }
 
 sub delete_dups
