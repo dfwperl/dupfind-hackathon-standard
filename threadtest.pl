@@ -4,7 +4,10 @@
 
 =head1 PROOF THAT MULTILEVEL DATASTRUCTURES CAN BE SHARED BETWEEN THREADS
 
-Yes.  Yes they can.
+Yes.  Yes they can.  It's just tricky.
+
+This is proof-of-concept code that has nothing to do with finding duplicate
+files like dupfind does.  This is not the code you're looking for.
 
 =cut
 
