@@ -11,6 +11,8 @@ more for large datasets.
 
 use 5.010;
 
+BEGIN { $|++ }
+
 use warnings;
 use strict;
 
