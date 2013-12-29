@@ -66,8 +66,10 @@ my $ftl = File::Util->new
 (
    {
       use_flock   => 0,
+      diag        => 1,
       read_limit  => $opts->{bytes},
       abort_depth => $opts->{maxdepth},
+      onfail      => 'undefined',
    }
 );
 
@@ -93,9 +95,13 @@ sub run
 {
    my $start_of_scan = Benchmark->new();
 
+   say '**SCANNING ALL FILES';
+
    my ( $sizes, $cmp_count ) = get_dup_sizes();
 
    exit unless keys %$sizes;
+
+   say '**CHECKSUMMING SIZE DUPLICATES';
 
    my $hashes = get_dup_hashes( $sizes );
 
@@ -162,13 +168,13 @@ sub worker
 
       #say "Thread $tid just got a hashing job: $file";
 
-      my $hash = xxhash_hex $ftl->load_file( $file ), 0;
+      my $data = $ftl->load_file( $file ) || next;
 
-      my $arrayref = &share( [] );
+      my $hash = xxhash_hex $data, 0;
 
       lock $hashes;
 
-      $hashes->{ $hash } ||= $arrayref;
+      $hashes->{ $hash } ||= &share( [] );
 
       push @{ $hashes->{ $hash } }, $file;
 
@@ -190,7 +196,8 @@ sub get_dup_sizes
             {
                my ( $selfdir, $subdirs, $files ) = @_;
 
-               push @{ $sizes->{ -s $_ } }, $_ for @$files;
+               push @{ $sizes->{ -s $_ } }, $_
+                  for grep { !-l $_ && defined -s $_ } @$files;
             }
       }
    );
@@ -200,6 +207,10 @@ sub get_dup_sizes
    delete $sizes->{ $_ }
       for grep { @{ $sizes->{ $_ } } == 1 }
       keys %$sizes;
+
+   $hashes->{'zero size'} = &share( $sizes->{0} ) if ref $sizes->{0};
+
+   delete $sizes->{0};
 
    return $sizes, $cmp_count;
 }
@@ -213,8 +224,15 @@ sub get_dup_hashes
    for my $size ( keys %$sizes )
    {
       my $group = $sizes->{ $size };
+      my %dev_inodes;
 
-      for my $file ( @$group )
+      # this will automatically throw out hardlinks, with the only surviving
+      # file being the first asciibetically-sorted entry
+      $dev_inodes{ join '', ( stat $_ )[0,1] } = $_ for reverse sort @$group;
+
+      next if scalar keys %dev_inodes == 1;
+
+      for my $file ( values %dev_inodes )
       {
          my $tid = $pool_queue->dequeue;
 
@@ -223,10 +241,6 @@ sub get_dup_hashes
          $worker_queues->{ $tid }->enqueue( $file ) if !$thread_term;
       }
    }
-
-   # wait until all threads are no longer busy
-
-   #sleep 1 until $pool_queue->pending == $opts->{threads};
 
    # ...tell the threads to exit, blocking wait
 
