@@ -353,16 +353,4 @@ ARGUMENTS AND FLAGS:
                   duplicate files are found.  This will leave you with no
                   duplicate files when execution is finished
 
-*  -s, --save     Name of the file in which you want to save the scan results
-                  for quick retrieval later.  It will be stored in a binary
-                  format that is understood only by this program.  Work in
-                  progress, not implemented yet
-
-*  -u, --unsave   Name of a file which was previously created by calling this
-                  program with the --save option.  Doing this retrieves the
-                  results from the previously saved scan and displays them
-                  on your screen, or prompts you to delete duplicates if you
-                  use this with the --prompt option.  You can also use it
-                  with the --remove option.  Work in progress, not implemented
-
 __USAGE__
