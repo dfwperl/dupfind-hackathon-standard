@@ -161,15 +161,19 @@ sub get_dup_hashes
       for grep { @{ $hashes->{ $_ } } == 1 }
       keys %$hashes;
 
+   my $priv_hashes = {};
+
    # sort dup groupings
    for my $hash ( keys %$hashes )
    {
       my @group = @{ $hashes->{ $hash } };
 
-      $hashes->{ $hash } = [ sort { uc $a cmp uc $b } @group ];
+      $priv_hashes->{ $hash } = [ sort { uc $a cmp uc $b } @group ];
    }
 
-   return $hashes;
+   undef $hashes;
+
+   return $priv_hashes;
 }
 
 sub show_dups
