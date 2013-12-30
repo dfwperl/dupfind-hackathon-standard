@@ -171,7 +171,7 @@ sub worker
 
       #say "Thread $tid just got a hashing job: $file";
 
-      my $data = $ftl->load_file( $file ) || next;
+      my $data = $ftl->load_file( $file ) // next;
 
       my $hash = xxhash_hex $data, 0;
 
@@ -211,7 +211,7 @@ sub get_dup_sizes
       for grep { @{ $sizes->{ $_ } } == 1 }
       keys %$sizes;
 
-   $hashes->{'zero size'} = &share( $sizes->{0} ) if ref $sizes->{0};
+   $hashes->{'zero size'} = &shared_clone( $sizes->{0} ) if ref $sizes->{0};
 
    delete $sizes->{0};
 

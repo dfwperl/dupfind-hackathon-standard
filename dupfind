@@ -147,7 +147,7 @@ sub get_dup_hashes
       for my $file ( values %dev_inodes )
       {
 
-         my $data = $ftl->load_file( $file ) || next;
+         my $data = $ftl->load_file( $file ) // next;
 
          my $hash = xxhash_hex $data, 0;
 
