@@ -249,9 +249,18 @@ sub get_dup_hashes
 
    end_wait_thread_pool();
 
+   # get rid of non-dupes
    delete $hashes->{ $_ }
       for grep { @{ $hashes->{ $_ } } == 1 }
       keys %$hashes;
+
+   # sort dup groupings
+   for my $hash ( keys %$hashes )
+   {
+      my @group = @{ $hashes->{ $hash } };
+
+      $hashes->{ $hash } = [ sort { uc $a cmp uc $b } @group ];
+   }
 
    return $hashes;
 }
@@ -261,7 +270,10 @@ sub show_dups
    my $hashes = shift;
    my $dupes  = 0;
 
-   for my $hash ( keys %$hashes )
+   for my $hash
+   (
+      sort { uc $hashes->{ $a }->[0] cmp uc $hashes->{ $b }->[0] } keys %$hashes
+   )
    {
       my $group = $hashes->{ $hash };
 
