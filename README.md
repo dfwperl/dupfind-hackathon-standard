@@ -12,7 +12,7 @@ This code doesn't handle hard links.  This proof of concept code
 is meant to give you one way to approach the problem.  It is not
 meant to give you a full solution (you need to make your own).
 
-Hint: for handling hard links, `perldoc -f lstat`
+Hint: for handling symlinks, `perldoc -f lstat`
 
 ## AUTHOR
 
