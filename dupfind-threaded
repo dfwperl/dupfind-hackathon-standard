@@ -7,6 +7,9 @@
 ...which seems to have memory issues, but at double the speed or
 more for large datasets.
 
+UPDATE: turns out memory issues aren't that bad, even for 100GB of
+data spanning anywhere between 5K and 37K files
+
 =cut
 
 use 5.010;
