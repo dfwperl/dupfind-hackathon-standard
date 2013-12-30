@@ -369,4 +369,10 @@ ARGUMENTS AND FLAGS:
                   duplicate files are found.  This will leave you with no
                   duplicate files when execution is finished
 
+   -t, --threads  Number of threads to use for file comparisons.  Defaults
+                  to 10, but lower numbers will do better on systems with
+                  fewer cores.  You'll usually get best performance using a
+                  number of threads equal to the number of logical processors
+                  on your system, plus 1.
+
 __USAGE__
