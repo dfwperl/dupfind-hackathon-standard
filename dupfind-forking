@@ -4,17 +4,26 @@
 
 =head1 FORKING VERSION OF DUPFIND
 
-...abandoned (perhaps unwisely) in favor of the threaded version which
-shows very significant performance gains, but at the cost of memory
-issues which I have not solved.
+...not finished.  Opted (perhaps unwisely) in favor of the threaded version
+which shows very significant performance gains over the original, but at the
+cost of memory issues have since been resolved.
 
 This code is not tested and probably won't work yet.
+
+=head1 CAVEATS
 
 The big issue with forking is that you can't share datastructures between
 forks without involving something like Storable, which brings with it
 performance penalties every time you have serialize/deserialize the
 datastructure between forks.  The performance gains you get by adding
-parallelism are then lost.
+parallelism are then lost.  This isn't an issue when you need to pass
+datastructures between forks infrequently, but such is NOT the case with
+this code.  I'd like to get back to a forked solution instead of threaded,
+but for now this doesn't seem possible in the near term without outside
+assistance/contribution.
+
+Recent optimizations and bug fixes from dupfind-threaded need to be ported
+back to this code.  I.E.: vimdiff it.
 
 =cut
 
