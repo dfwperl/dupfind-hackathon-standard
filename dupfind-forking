@@ -4,11 +4,14 @@
 
 =head1 FORKING VERSION OF DUPFIND
 
-...not finished.  Opted (perhaps unwisely) in favor of the threaded version
-which shows very significant performance gains over the original, but at the
-cost of memory issues have since been resolved.
+...not finished.  DO NOT USE.  Use ./dupfind or ./dupfind-threaded instead.
 
-This code is not tested and probably won't work yet.
+I opted in favor of the threaded version which shows very significant 
+performance gains over the original when used with the proper number of 
+threads for the host machine running the code.
+
+This forking code is not tested won't work (yet).  Unless it is lovingly
+adopted soon, it will be removed to prevent confusion.
 
 =head1 CAVEATS
 
