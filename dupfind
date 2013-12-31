@@ -22,6 +22,7 @@ my $opts =
    prompt   => 0,
    remove   => 0,
    links    => 0,
+   format   => 'human', # formatting options are either "human" or "robot"
 };
 
 GetOptions
@@ -34,6 +35,7 @@ GetOptions
    'remove|r'     => \$opts->{remove},
    'delete'       => \$opts->{remove}, # <-- that's not a typo
    'help|h|?'     => \$opts->{help},
+   'format|f=s'   => \$opts->{format},
 ) or die usage();
 
 die usage() unless defined $opts->{dir};
@@ -58,6 +60,7 @@ $run_time = timestr $run_time;
 $del_time = $opts->{remove} ? timestr $del_time : 0;
 
 say <<__SUMMARY__;
+------------------------------
 ** TOTAL SCANNED: $cmp_count
 ** TOTAL DUPES:   $dup_count
 ** SCAN TIME:     $run_time
@@ -72,13 +75,13 @@ sub run
 {
    my $start_of_scan = Benchmark->new();
 
-   say '**SCANNING ALL FILES';
+   say '** SCANNING ALL FILES';
 
    my ( $sizes, $cmp_count ) = get_dup_sizes();
 
    exit unless keys %$sizes;
 
-   say '**CHECKSUMMING SIZE DUPLICATES';
+   say '** CHECKSUMMING SIZE DUPLICATES';
 
    my $hashes = get_dup_hashes( $sizes );
 
@@ -87,6 +90,10 @@ sub run
    exit unless keys %$hashes;
 
    my $end_of_scan = Benchmark->new();
+
+   say '** DISPLAYING OUTPUT';
+
+   say '-' x 30;
 
    my $dup_count   = show_dups( $hashes );
 
@@ -181,20 +188,36 @@ sub show_dups
    my $hashes = shift;
    my $dupes  = 0;
 
+   my $for_humans = sub # human-readable output
+   {
+      my ( $hash, $files ) = @_;
+
+      say sprintf 'DUPLICATES (hash: %s | size: %db)', $hash, -s $$files[0];
+
+      say "   $_" for @$files;
+
+      say '';
+   };
+
+   my $for_robots = sub # machine parseable output
+   {
+      my ( $hash, $files ) = @_;
+
+      say join "\t", @$files
+   };
+
+   my $formatter = $opts->{format} eq 'human' ? $for_humans : $for_robots;
+
    for my $hash
    (
       sort { uc $hashes->{ $a }->[0] cmp uc $hashes->{ $b }->[0] } keys %$hashes
    )
    {
-      my $group = $hashes->{ $hash };
+      my $files = $hashes->{ $hash };
 
-      say sprintf 'DUPLICATES (hash: %s | size: %db)', $hash, -s $$group[0];
+      $formatter->( $hash => $files );
 
-      say "   $_" for @$group;
-
-      $dupes += @$group - 1;
-
-      say '--';
+      $dupes += @$files - 1;
    }
 
    return $dupes
@@ -275,5 +298,9 @@ ARGUMENTS AND FLAGS:
    -r, --remove   Delete (WITHOUT PROMPTING) all but the first copy if
                   duplicate files are found.  This will leave you with no
                   duplicate files when execution is finished
+
+   -f, --format   Specify either "human" or "robot".  Human-readable output
+                  is generated for easy viewing by default.  If you want output
+                  that is machine-parseable, specify "robot"
 
 __USAGE__
