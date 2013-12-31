@@ -6,13 +6,17 @@ dupfind
 File deduplicator written in Perl as a proof-of-concept for the
 Dallas/Fort Worth Perl Mongers Winter 2013 hackathon competition.
 
-## BUGS/CAVEATS
+see http://dfw.pm.org for details
 
-This code doesn't handle hard links.  This proof of concept code
-is meant to give you one way to approach the problem.  It is not
-meant to give you a full solution (you need to make your own).
+## SOLUTION PROVIDED
 
-Hint: for handling symlinks, `perldoc -f lstat`
+A solution is provided to the 100GB reference data (filesystem) at
+perl.atrixnet.com in the file "dedup-solution-output"
+
+That data will be regenerated on or some time before 01/08/2014 so the
+solution contained here will no longer be valid until updated.  This
+documentation will be updated to reflect the change when it happens
+as part of the hackathon proceedings.
 
 ## AUTHOR
 
