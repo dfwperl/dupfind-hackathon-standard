@@ -69,6 +69,7 @@ $opts->{weed} = 0  if $opts->{weed} =~ /^(n|no)$/i;
 my $pool_queue     = Thread::Queue->new;
 my $worker_queues  = {};
 my $thread_term    :shared = 0;
+my $threads_init   :shared = 0;
 
 my $ftl = File::Util->new
 (
@@ -139,6 +140,14 @@ sub run
 
    $sizes = toss_out_hardlinks( $sizes );
 
+   # you have to do this for this threaded version of dupfind, and it has to
+   # happen after you've already pruned out the hardlinks (above)
+   {
+      $hashes->{'zero size'} = &shared_clone( $sizes->{0} ) if ref $sizes->{0};
+
+      delete $sizes->{0};
+   }
+
    $size_dup_count = keys %$sizes;
 
    my $end_of_prune = Benchmark->new();
@@ -206,10 +215,14 @@ sub create_thread_pool
 
       $worker_queues->{ $worker_thread->tid } = $thread_queue;
    }
+
+   lock $threads_init; $threads_init++;
 }
 
 sub end_wait_thread_pool
 {
+   exit unless $threads_init;
+
    $thread_term++;
 
    $worker_queues->{ $_ }->end for keys %$worker_queues;
@@ -373,10 +386,6 @@ sub get_dup_sizes
    delete $sizes->{ $_ }
       for grep { @{ $sizes->{ $_ } } == 1 }
       keys %$sizes;
-
-   $hashes->{'zero size'} = &shared_clone( $sizes->{0} ) if ref $sizes->{0};
-
-   delete $sizes->{0};
 
    return $sizes, $cmp_count;
 }
