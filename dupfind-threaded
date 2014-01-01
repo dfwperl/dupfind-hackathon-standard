@@ -492,6 +492,10 @@ ARGUMENTS AND FLAGS:
 
    -d, --dir      Name of the directory you want to search for duplicates
 
+   -f, --format   Specify either "human" or "robot".  Human-readable output
+                  is generated for easy viewing by default.  If you want output
+                  that is machine-parseable, specify "robot"
+
 *  -l, --links    Follow symlinks (by default it does not).  Because this
                   has some safety implications and is a complex matter,
                   it is not yet supported.  Sorry, check back later.
@@ -505,10 +509,6 @@ ARGUMENTS AND FLAGS:
    -r, --remove   Delete (WITHOUT PROMPTING) all but the first copy if
                   duplicate files are found.  This will leave you with no
                   duplicate files when execution is finished
-
-   -f, --format   Specify either "human" or "robot".  Human-readable output
-                  is generated for easy viewing by default.  If you want output
-                  that is machine-parseable, specify "robot"
 
    -t, --threads  Number of threads to use for file comparisons.  Defaults
                   to 10, but lower numbers will do better on systems with
