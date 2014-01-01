@@ -23,7 +23,7 @@ my $opts =
    remove   => 0,
    links    => 0,
    format   => 'human', # formatting options are either "human" or "robot"
-   weed     => 0,
+   weed     => 1,
 };
 
 GetOptions
@@ -43,6 +43,7 @@ GetOptions
 die usage() unless defined $opts->{dir};
 
 $opts->{remove}++ if $opts->{prompt};
+$opts->{weed} = 0 if $opts->{weed} =~ /^(n|no)$/i;
 
 my $ftl = File::Util->new
 (
@@ -64,11 +65,11 @@ my
    $del_time,   $run_time
 ) = run();
 
+$weeding_time = $opts->{weed}   ? timestr $weeding_time : 'did not weed';
+$del_time     = $opts->{remove} ? timestr $del_time     : 'no deletions';
 $scan_time    = timestr $scan_time;
-$weeding_time = timestr $weeding_time;
 $hashing_time = timestr $hashing_time;
 $run_time     = timestr $run_time;
-$del_time     = $opts->{remove} ? timestr $del_time : 0;
 
 say <<__SUMMARY__;
 ------------------------------
@@ -144,8 +145,8 @@ sub run
    return $cmp_count,
           $size_dup_count,
           $dup_count,
-          timediff( $end_of_weeding, $start_of_weeding ),
           timediff( $end_of_scan,    $start_of_scan    ),
+          timediff( $end_of_weeding, $start_of_weeding ),
           timediff( $end_of_hashing, $start_of_hashing ),
           timediff( $end_of_del,     $start_of_del     ),
           timediff( $end_of_run,     $start_of_run     );
@@ -412,11 +413,10 @@ ARGUMENTS AND FLAGS:
                   is generated for easy viewing by default.  If you want output
                   that is machine-parseable, specify "robot"
 
-   -w, --weed     Default: disabled.  Try to avoid unnecessary file hashing
-                  by weeding out potential duplicates with a simple, quick
-                  comparison of the last 1024 bytes of data in same-size files.
-                  In some cases this produces performance gains.  In situations
-                  where you have a very large number of small files, it could
-                  actually have the opposite effect.
+   -w, --weed     Either yes or no.  (Default yes).  Tries to avoid unnecessary
+                  file hashing by weeding out potential duplicates with a
+                  simple, quick comparison of the last 1024 bytes of data in
+                  same-size files.  This typically produces very significant
+                  performance gains, especially with large numbers of files.
 
 __USAGE__
