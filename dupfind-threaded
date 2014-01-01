@@ -139,6 +139,8 @@ sub run
 
    $sizes = toss_out_hardlinks( $sizes );
 
+   $size_dup_count = keys %$sizes;
+
    my $end_of_prune = Benchmark->new();
 
    say '** NO DUPLICATES FOUND' and exit unless keys %$sizes;
@@ -149,8 +151,6 @@ sub run
    my $start_of_weeding = Benchmark->new();
 
    $sizes = remove_obviously_different( $sizes ) if $opts->{weed};
-
-   $size_dup_count = keys %$sizes;
 
    my $end_of_weeding = Benchmark->new();
 
