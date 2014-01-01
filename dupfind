@@ -23,6 +23,7 @@ my $opts =
    remove   => 0,
    links    => 0,
    format   => 'human', # formatting options are either "human" or "robot"
+   weed     => 0,
 };
 
 GetOptions
@@ -36,6 +37,7 @@ GetOptions
    'delete'       => \$opts->{remove}, # <-- that's not a typo
    'help|h|?'     => \$opts->{help},
    'format|f=s'   => \$opts->{format},
+   'weed|w'       => \$opts->{weed},
 ) or die usage();
 
 die usage() unless defined $opts->{dir};
@@ -100,11 +102,11 @@ sub run
    say '** NO DUPLICATES FOUND' and exit unless keys %$sizes;
 
 
-   say '** WEEDING-OUT FILES THAT ARE OBVIOUSLY DIFFERENT';
+   say '** WEEDING-OUT FILES THAT ARE OBVIOUSLY DIFFERENT' if $opts->{weed};
 
    my $start_of_weeding = Benchmark->new();
 
-   $sizes = remove_obviously_different( $sizes );
+   $sizes = remove_obviously_different( $sizes ) if $opts->{weed};
 
    $size_dup_count = keys %$sizes;
 
@@ -409,5 +411,12 @@ ARGUMENTS AND FLAGS:
    -f, --format   Specify either "human" or "robot".  Human-readable output
                   is generated for easy viewing by default.  If you want output
                   that is machine-parseable, specify "robot"
+
+   -w, --weed     Default: disabled.  Try to avoid unnecessary file hashing
+                  by weeding out potential duplicates with a simple, quick
+                  comparison of the last 1024 bytes of data in same-size files.
+                  In some cases this produces performance gains.  In situations
+                  where you have a very large number of small files, it could
+                  actually have the opposite effect.
 
 __USAGE__
