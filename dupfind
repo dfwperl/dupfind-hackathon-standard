@@ -59,29 +59,33 @@ my $ftl = File::Util->new
 
 my
 (
-   $cmp_count,  $size_dup_count,
-   $dup_count,  $weeding_time,
-   $scan_time,  $hashing_time,
-   $del_time,   $run_time
+   $cmp_count,    $size_dup_count,
+   $dup_count,    $scan_time,
+   $prune_time,   $weed_time,
+   $hash_time,    $del_time,
+   $run_time
 ) = run();
 
-$weeding_time = $opts->{weed}   ? timestr $weeding_time : 'did not weed';
-$del_time     = $opts->{remove} ? timestr $del_time     : 'no deletions';
-$scan_time    = timestr $scan_time;
-$hashing_time = timestr $hashing_time;
-$run_time     = timestr $run_time;
+$weed_time  = $opts->{weed}   ? timestr $weed_time : 'did not weed';
+$del_time   = $opts->{remove} ? timestr $del_time  : 'no deletions';
+$scan_time  = timestr $scan_time;
+$prune_time = timestr $prune_time;
+$hash_time  = timestr $hash_time;
+$run_time   = timestr $run_time;
 
 say <<__SUMMARY__;
 ------------------------------
-** THREADS:             None
-** TOTAL FILES SCANNED: $cmp_count
-** TOTAL SAME SIZE:     $size_dup_count
-** TOTAL ACTUAL DUPES:  $dup_count
-** TREE SCAN TIME:      $scan_time
-** WEED-OUT TIME:       $weeding_time
-** CRYPTO-HASHING TIME: $hashing_time
-** DELETION TIME:       $del_time
-** TOTAL RUN TIME:      $run_time
+** THREADS...............No threading
+** TOTAL FILES SCANNED...$cmp_count
+** TOTAL SAME SIZE.......$size_dup_count
+** TOTAL ACTUAL DUPES....$dup_count
+      -- TIMES --
+** TREE SCAN TIME........$scan_time
+** HARDLINK PRUNE TIME...$prune_time
+** WEED-OUT TIME.........$weed_time
+** CRYPTO-HASHING TIME...$hash_time
+** DELETION TIME.........$del_time
+** TOTAL RUN TIME........$run_time
 __SUMMARY__
 
 exit;
@@ -99,6 +103,17 @@ sub run
    my ( $sizes, $cmp_count ) = get_dup_sizes();
 
    my $end_of_scan = Benchmark->new();
+
+   say '** NO DUPLICATES FOUND' and exit unless keys %$sizes;
+
+
+   say '** PRUNING HARD LINKS';
+
+   my $start_of_prune = Benchmark->new();
+
+   $sizes = toss_out_hardlinks( $sizes );
+
+   my $end_of_prune = Benchmark->new();
 
    say '** NO DUPLICATES FOUND' and exit unless keys %$sizes;
 
@@ -128,6 +143,7 @@ sub run
 
    say '** NO DUPLICATES FOUND' and exit unless keys %$hashes;
 
+
    say '** DISPLAYING OUTPUT';
 
    say '-' x 30;
@@ -146,6 +162,7 @@ sub run
           $size_dup_count,
           $dup_count,
           timediff( $end_of_scan,    $start_of_scan    ),
+          timediff( $end_of_prune,   $start_of_prune   ),
           timediff( $end_of_weeding, $start_of_weeding ),
           timediff( $end_of_hashing, $start_of_hashing ),
           timediff( $end_of_del,     $start_of_del     ),
@@ -242,6 +259,32 @@ sub get_file_lastbytes
    return $buff;
 }
 
+sub toss_out_hardlinks
+{
+   my $size_dups = shift;
+
+   for my $size ( keys %$size_dups )
+   {
+      my $group = $size_dups->{ $size };
+      my %dev_inodes;
+
+      # this will automatically throw out hardlinks, with the only surviving
+      # file being the first asciibetically-sorted entry
+      $dev_inodes{ join '', ( stat $_ )[0,1] } = $_ for reverse sort @$group;
+
+      if ( scalar keys %dev_inodes == 1 )
+      {
+         delete $size_dups->{ $size };
+      }
+      else
+      {
+         $size_dups->{ $size } = [ values %dev_inodes ];
+      }
+   }
+
+   return $size_dups;
+}
+
 sub get_dup_hashes
 {
    my $sizes  = shift;
@@ -252,15 +295,8 @@ sub get_dup_hashes
    for my $size ( keys %$sizes )
    {
       my $group = $sizes->{ $size };
-      my %dev_inodes;
 
-      # this will automatically throw out hardlinks, with the only surviving
-      # file being the first asciibetically-sorted entry
-      $dev_inodes{ join '', ( stat $_ )[0,1] } = $_ for reverse sort @$group;
-
-      next if scalar keys %dev_inodes == 1;
-
-      for my $file ( values %dev_inodes )
+      for my $file ( @$group )
       {
          open my $fh, '<', $file or next;
 
