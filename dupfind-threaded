@@ -80,17 +80,31 @@ my $ftl = File::Util->new
 
 $SIG{TERM} = $SIG{INT} = \&end_wait_thread_pool;
 
-my ( $cmp_count, $dup_count, $run_time, $del_time ) = run();
+my
+(
+   $cmp_count,  $size_dup_count,
+   $dup_count,  $weeding_time,
+   $scan_time,  $hashing_time,
+   $del_time,   $run_time
+) = run();
 
-$run_time = timestr $run_time;
-$del_time = $opts->{remove} ? timestr $del_time : 0;
+$scan_time    = timestr $scan_time;
+$weeding_time = timestr $weeding_time;
+$hashing_time = timestr $hashing_time;
+$run_time     = timestr $run_time;
+$del_time     = $opts->{remove} ? timestr $del_time : 0;
 
 say <<__SUMMARY__;
 ------------------------------
-** TOTAL SCANNED: $cmp_count
-** TOTAL DUPES:   $dup_count
-** SCAN TIME:     $run_time
-** DELETION TIME: $del_time
+** THREADS:             $opts->{threads}
+** TOTAL FILES SCANNED: $cmp_count
+** TOTAL SAME SIZE:     $size_dup_count
+** TOTAL ACTUAL DUPES:  $dup_count
+** TREE SCAN TIME:      $scan_time
+** WEED-OUT TIME:       $weeding_time
+** CRYPTO-HASHING TIME: $hashing_time
+** DELETION TIME:       $del_time
+** TOTAL RUN TIME:      $run_time
 __SUMMARY__
 
 exit;
@@ -99,38 +113,67 @@ exit;
 
 sub run
 {
-   my $start_of_scan = Benchmark->new();
+   my $start_of_run   = Benchmark->new();
+   my $start_of_scan  = Benchmark->new();
+   my $size_dup_count = 0;
 
-   say '** SCANNING ALL FILES';
+   say '** SCANNING ALL FILES FOR SIZE DUPLICATES';
 
    my ( $sizes, $cmp_count ) = get_dup_sizes();
 
-   exit unless keys %$sizes;
+   my $end_of_scan = Benchmark->new();
+
+   say '** NO DUPLICATES FOUND' and exit unless keys %$sizes;
+
+
+   say '** WEEDING-OUT FILES THAT ARE OBVIOUSLY DIFFERENT';
+
+   my $start_of_weeding = Benchmark->new();
+
+   $sizes = remove_obviously_different( $sizes );
+
+   $size_dup_count = keys %$sizes;
+
+   my $end_of_weeding = Benchmark->new();
+
+   say '** NO DUPLICATES FOUND' and exit unless $size_dup_count;
+
 
    say '** CHECKSUMMING SIZE DUPLICATES';
 
+   my $start_of_hashing = Benchmark->new();
+
    my $hashes = get_dup_hashes( $sizes );
 
-   undef $sizes;
+   my $end_of_hashing = Benchmark->new();
 
-   exit unless keys %$hashes;
+   undef $sizes; # free up some RAM
 
-   my $end_of_scan = Benchmark->new();
+   say '** NO DUPLICATES FOUND' and exit unless keys %$hashes;
 
    say '** DISPLAYING OUTPUT';
 
    say '-' x 30;
 
-   my $dup_count   = show_dups( $hashes );
+   my $dup_count  = show_dups( $hashes );
+
+   my $start_of_del = Benchmark->new();
 
    delete_dups( $hashes ) if $opts->{remove};
 
    my $end_of_del = Benchmark->new();
 
+   my $end_of_run   = Benchmark->new();
+
    return $cmp_count,
+          $size_dup_count,
           $dup_count,
-          timediff( $end_of_scan, $start_of_scan ),
-          timediff( $end_of_del, $end_of_scan );
+          timediff( $end_of_weeding, $start_of_weeding ),
+          timediff( $end_of_scan,    $start_of_scan    ),
+          timediff( $end_of_hashing, $start_of_hashing ),
+          timediff( $end_of_del,     $start_of_del     ),
+          timediff( $end_of_run,     $start_of_run     );
+
 }
 
 sub create_thread_pool
@@ -161,6 +204,8 @@ sub worker
    my $work_queue = shift;
    my $tid = threads->tid;
 
+   local $/;
+
    while ( !$thread_term )
    {
       #say "Thread $tid is idle";
@@ -178,7 +223,11 @@ sub worker
 
       #say "Thread $tid just got a hashing job: $file";
 
-      my $data = $ftl->load_file( $file ) // next;
+      open my $fh, '<', $file or next;
+
+      my $data = <$fh>;
+
+      close $fh;
 
       my $hash = xxhash_hex $data, 0;
 
@@ -190,6 +239,68 @@ sub worker
 
       #say "Thread $tid is done hashing: $file";
    }
+}
+
+sub remove_obviously_different
+{
+   # weed out files that are obviously different, based on the last
+   # few bytes in the file.  This saves us from unnecessary hashing
+
+   my $size_matches = shift;
+   my $zero_sized   = delete $size_matches->{0};
+
+   for my $same_size ( keys %$size_matches )
+   {
+      my @group = sort { $a cmp $b } @{ $size_matches->{ $same_size } };
+
+      my $same_last_bytes = {};
+
+      for my $file ( @group )
+      {
+         my $last_bytes = get_file_lastbytes( $file => $same_size );
+
+         push @{ $same_last_bytes->{ $last_bytes } }, $file;
+      }
+
+      # delete obvious non-dupe files from the group of same-size files
+      # by virtue of the fact that they will be a single length arrayref
+
+      delete $same_last_bytes->{ $_ }
+         for grep { @{ $same_last_bytes->{ $_ } } == 1 }
+         keys %$same_last_bytes;
+
+      # recompose the arrayref of filenames for the same-size file grouping
+      # but leave out the files we just weeded out from the group
+
+      $size_matches->{ $same_size } = []; # start fresh
+
+      push @{ $size_matches->{ $same_size } },
+         map { @{ $same_last_bytes->{ $_ } } }
+         keys %$same_last_bytes;
+   }
+
+   $size_matches->{0} = $zero_sized if ref $zero_sized;
+
+   return $size_matches;
+}
+
+sub get_file_lastbytes
+{
+   my ( $file, $len ) = @_;
+
+   my $buff;
+
+   sysopen my $fh, $file, 0;
+
+   return unless defined $fh;
+
+   sysseek $fh, $len - 1024, 0;
+
+   sysread $fh, $buff, 1024;
+
+   close $fh or return;
+
+   return $buff;
 }
 
 
