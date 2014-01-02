@@ -29,15 +29,15 @@ my $opts =
 GetOptions
 (
    'dir|d=s'      => \$opts->{dir},
-   'bytes|b=s'    => \$opts->{bytes},
-   'maxdepth|m=s' => \$opts->{maxdepth},
-   'links|l=s'    => \$opts->{links},
+   'bytes|b=i'    => \$opts->{bytes},
+   'maxdepth|m=i' => \$opts->{maxdepth},
+   'links|l'      => \$opts->{links},
    'prompt|p'     => \$opts->{prompt},
-   'remove|r'     => \$opts->{remove},
+   'remove|x'     => \$opts->{remove},
    'delete'       => \$opts->{remove}, # <-- that's not a typo
    'help|h|?'     => \$opts->{help},
    'format|f=s'   => \$opts->{format},
-   'weed|w'       => \$opts->{weed},
+   'weed|w=s'     => \$opts->{weed},
 ) or die usage();
 
 die usage() unless defined $opts->{dir};
@@ -56,22 +56,17 @@ my $ftl = File::Util->new
    }
 );
 
+my $benchmarks =
+{
+   scanfs   => { },
+   prune    => { },
+   weed     => { },
+   digest   => { },
+   remove   => { },
+   run      => { },
+};
 
-my
-(
-   $cmp_count,    $size_dup_count,
-   $dup_count,    $scan_time,
-   $prune_time,   $weed_time,
-   $hash_time,    $del_time,
-   $run_time
-) = run();
-
-$weed_time  = $opts->{weed}   ? timestr $weed_time : 'did not weed';
-$del_time   = $opts->{remove} ? timestr $del_time  : 'no deletions';
-$scan_time  = timestr $scan_time;
-$prune_time = timestr $prune_time;
-$hash_time  = timestr $hash_time;
-$run_time   = timestr $run_time;
+my ( $cmp_count, $size_dup_count, $dup_count ) = run();
 
 say <<__SUMMARY__;
 ------------------------------
@@ -80,12 +75,12 @@ say <<__SUMMARY__;
 ** TOTAL SAME SIZE.......$size_dup_count
 ** TOTAL ACTUAL DUPES....$dup_count
       -- TIMES --
-** TREE SCAN TIME........$scan_time
-** HARDLINK PRUNE TIME...$prune_time
-** WEED-OUT TIME.........$weed_time
-** CRYPTO-HASHING TIME...$hash_time
-** DELETION TIME.........$del_time
-** TOTAL RUN TIME........$run_time
+** TREE SCAN TIME........$benchmarks->{scanfs}->{result}
+** HARDLINK PRUNE TIME...$benchmarks->{prune}->{result}
+** WEED-OUT TIME.........$benchmarks->{weed}->{result}
+** CRYPTO-HASHING TIME...$benchmarks->{digest}->{result}
+** DELETION TIME.........$benchmarks->{remove}->{result}
+** TOTAL RUN TIME........$benchmarks->{run}->{result}
 __SUMMARY__
 
 exit;
@@ -94,80 +89,102 @@ exit;
 
 sub run
 {
-   my $start_of_run   = Benchmark->new();
-   my $start_of_scan  = Benchmark->new();
+   bench_this( run => 'start' );
+
+   my ( $size_dups, $cmp_count ) = scanfs();
+
    my $size_dup_count = 0;
+
+   ( $size_dups, $size_dup_count ) = prune_hardlinks( $size_dups );
+
+   $size_dups = weed_out( $size_dups );
+
+   my $digest_dups = digest_the_rest( $size_dups );
+
+   undef $size_dups; # free up some RAM
+
+   say '** DISPLAYING OUTPUT'; say '-' x 30;
+
+   my $dup_count = show_dups( $digest_dups );
+
+   delete_dups( $digest_dups ) if $opts->{remove};
+
+   bench_this( run => 'end' );
+
+   calculate_bench_times();
+
+   return $cmp_count, $size_dup_count, $dup_count;
+
+}
+
+sub scanfs
+{
+   bench_this( scanfs => 'start' );
 
    say '** SCANNING ALL FILES FOR SIZE DUPLICATES';
 
    my ( $sizes, $cmp_count ) = get_dup_sizes();
 
-   my $end_of_scan = Benchmark->new();
+   bench_this( scanfs => 'end' );
 
    say '** NO DUPLICATES FOUND' and exit unless keys %$sizes;
 
+   return $sizes, $cmp_count
+}
+
+sub prune_hardlinks
+{
+   my $size_dups = shift;
 
    say '** PRUNING HARD LINKS';
 
-   my $start_of_prune = Benchmark->new();
+   bench_this( prune => 'start' );
 
-   $sizes = toss_out_hardlinks( $sizes );
+   $size_dups = toss_out_hardlinks( $size_dups );
 
-   $size_dup_count = keys %$sizes;
+   my $size_dups_count = keys %$size_dups;
 
-   my $end_of_prune = Benchmark->new();
+   bench_this( prune => 'end' );
 
-   say '** NO DUPLICATES FOUND' and exit unless keys %$sizes;
+   say '** NO DUPLICATES FOUND' and exit unless $size_dups_count;
 
+   return $size_dups, $size_dups_count;
+}
 
-   say '** WEEDING-OUT FILES THAT ARE OBVIOUSLY DIFFERENT' if $opts->{weed};
+sub weed_out
+{
+   my $size_dups = shift;
 
-   my $start_of_weeding = Benchmark->new();
+   say '** WEEDING-OUT FILES THAT ARE OBVIOUSLY DIFFERENT';
 
-   $sizes = remove_obviously_different( $sizes ) if $opts->{weed};
+   bench_this( weed => 'start' );
 
-   my $end_of_weeding = Benchmark->new();
+   $size_dups = remove_obviously_different( $size_dups );
 
-   say '** NO DUPLICATES FOUND' and exit unless $size_dup_count;
+   bench_this( weed => 'end' );
 
+   say '** NO DUPLICATES FOUND' and exit unless keys %$size_dups;
+
+   return $size_dups;
+}
+
+sub digest_the_rest
+{
+   my $size_dups = shift;
 
    say '** CHECKSUMMING SIZE DUPLICATES';
 
-   my $start_of_hashing = Benchmark->new();
+   bench_this( digest => 'start' );
 
-   my $hashes = get_dup_hashes( $sizes );
+   my $digest_dups = get_dup_digests( $size_dups );
 
-   my $end_of_hashing = Benchmark->new();
+   bench_this( digest => 'end' );
 
-   undef $sizes; # free up some RAM
+   say '** NO DUPLICATES FOUND' and exit unless keys %$digest_dups;
 
-   say '** NO DUPLICATES FOUND' and exit unless keys %$hashes;
-
-
-   say '** DISPLAYING OUTPUT';
-
-   say '-' x 30;
-
-   my $dup_count  = show_dups( $hashes );
-
-   my $start_of_del = Benchmark->new();
-
-   delete_dups( $hashes ) if $opts->{remove};
-
-   my $end_of_del = Benchmark->new();
-
-   my $end_of_run   = Benchmark->new();
-
-   return $cmp_count,
-          $size_dup_count,
-          $dup_count,
-          timediff( $end_of_scan,    $start_of_scan    ),
-          timediff( $end_of_prune,   $start_of_prune   ),
-          timediff( $end_of_weeding, $start_of_weeding ),
-          timediff( $end_of_hashing, $start_of_hashing ),
-          timediff( $end_of_del,     $start_of_del     ),
-          timediff( $end_of_run,     $start_of_run     );
+   return $digest_dups;
 }
+
 
 sub get_dup_sizes
 {
@@ -285,10 +302,10 @@ sub toss_out_hardlinks
    return $size_dups;
 }
 
-sub get_dup_hashes
+sub get_dup_digests
 {
    my $sizes  = shift;
-   my $hashes = {};
+   my $digests = {};
 
    local $/;
 
@@ -304,41 +321,41 @@ sub get_dup_hashes
 
          close $fh;
 
-         my $hash = xxhash_hex $data, 0;
+         my $digest = xxhash_hex $data, 0;
 
-         push @{ $hashes->{ $hash } }, $file
+         push @{ $digests->{ $digest } }, $file
       }
    }
 
-   delete $hashes->{ $_ }
-      for grep { @{ $hashes->{ $_ } } == 1 }
-      keys %$hashes;
+   delete $digests->{ $_ }
+      for grep { @{ $digests->{ $_ } } == 1 }
+      keys %$digests;
 
-   my $priv_hashes = {};
+   my $priv_digests = {};
 
    # sort dup groupings
-   for my $hash ( keys %$hashes )
+   for my $digest ( keys %$digests )
    {
-      my @group = @{ $hashes->{ $hash } };
+      my @group = @{ $digests->{ $digest } };
 
-      $priv_hashes->{ $hash } = [ sort { $a cmp $b } @group ];
+      $priv_digests->{ $digest } = [ sort { $a cmp $b } @group ];
    }
 
-   undef $hashes;
+   undef $digests;
 
-   return $priv_hashes;
+   return $priv_digests;
 }
 
 sub show_dups
 {
-   my $hashes = shift;
+   my $digests = shift;
    my $dupes  = 0;
 
    my $for_humans = sub # human-readable output
    {
-      my ( $hash, $files ) = @_;
+      my ( $digest, $files ) = @_;
 
-      say sprintf 'DUPLICATES (hash: %s | size: %db)', $hash, -s $$files[0];
+      say sprintf 'DUPLICATES (digest: %s | size: %db)', $digest, -s $$files[0];
 
       say "   $_" for @$files;
 
@@ -347,21 +364,21 @@ sub show_dups
 
    my $for_robots = sub # machine parseable output
    {
-      my ( $hash, $files ) = @_;
+      my ( $digest, $files ) = @_;
 
       say join "\t", @$files
    };
 
    my $formatter = $opts->{format} eq 'human' ? $for_humans : $for_robots;
 
-   for my $hash
+   for my $digest
    (
-      sort { $hashes->{ $a }->[0] cmp $hashes->{ $b }->[0] } keys %$hashes
+      sort { $digests->{ $a }->[0] cmp $digests->{ $b }->[0] } keys %$digests
    )
    {
-      my $files = $hashes->{ $hash };
+      my $files = $digests->{ $digest };
 
-      $formatter->( $hash => $files );
+      $formatter->( $digest => $files );
 
       $dupes += @$files - 1;
    }
@@ -371,15 +388,17 @@ sub show_dups
 
 sub delete_dups
 {
-   my $hashes  = shift;
+   my $digests = shift;
+
+   bench_this( remove => 'start' );
 
    my $removed = 0;
 
-   for my $hash ( keys %$hashes )
+   for my $digest ( keys %$digests )
    {
-      my $group = $hashes->{ $hash };
+      my $group = $digests->{ $digest };
 
-      say sprintf 'KEPT    (%s) %s', $hash, $group->[0];
+      say sprintf 'KEPT    (%s) %s', $digest, $group->[0];
 
       shift @$group;
 
@@ -389,7 +408,7 @@ sub delete_dups
          {
             unless ( prompt 'y', "REMOVE DUPLICATE? $dup", '', 'n' )
             {
-               say sprintf 'KEPT    (%s) %s', $hash, $dup;
+               say sprintf 'KEPT    (%s) %s', $digest, $dup;
 
                next;
             }
@@ -399,13 +418,40 @@ sub delete_dups
 
          $removed++;
 
-         say sprintf 'REMOVED (%s) %s', $hash, $dup;
+         say sprintf 'REMOVED (%s) %s', $digest, $dup;
       }
 
       say '--';
    }
 
-   say "** TOTAL DUPLICATE FILES REMOVED: $removed"
+   say "** TOTAL DUPLICATE FILES REMOVED: $removed";
+
+   bench_this( remove => 'end' );
+}
+
+sub bench_this
+{
+   my ( $mark, $start_end ) = @_;
+
+   $benchmarks->{ $mark }->{ $start_end } = Benchmark->new();
+}
+
+sub calculate_bench_times
+{
+   for my $mark ( keys %$benchmarks )
+   {
+      next unless $benchmarks->{ $mark }->{start};
+
+      $benchmarks->{ $mark }->{result} =
+         timestr timediff
+         (
+            $benchmarks->{ $mark }->{end},
+            $benchmarks->{ $mark }->{start}
+         );
+   }
+
+   $benchmarks->{weed}->{result}   ||= 'did not weed';
+   $benchmarks->{remove}->{result} ||= 'no deletions';
 }
 
 # This is just the help message:
@@ -445,7 +491,7 @@ ARGUMENTS AND FLAGS:
 
    -p, --prompt   Interactively prompt user to delete detected duplicates
 
-   -r, --remove   Delete (WITHOUT PROMPTING) all but the first copy if
+   -x, --remove   Delete (WITHOUT PROMPTING) all but the first copy if
                   duplicate files are found.  This will leave you with no
                   duplicate files when execution is finished
 

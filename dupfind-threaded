@@ -14,7 +14,7 @@ data spanning anywhere between 5K and 37K files
 
 use 5.010;
 
-BEGIN { $|++ }
+BEGIN { $|++; $SIG{TERM} = $SIG{INT} = \&end_wait_thread_pool; }
 
 use warnings;
 use strict;
@@ -23,7 +23,7 @@ use threads;
 use threads::shared;
 use Thread::Queue;
 
-my $hashes = &share( {} );
+my $digests = &share( {} ); # shared between threads, so we put this right up top
 
 use File::Util;
 use Digest::xxHash 'xxhash_hex';
@@ -43,21 +43,23 @@ my $opts =
    threads  => 10,
    format   => 'human', # formatting options are either "human" or "robot"
    weed     => 1,
+   qsize    => 30,
 };
 
 GetOptions
 (
    'dir|d=s'      => \$opts->{dir},
-   'bytes|b=s'    => \$opts->{bytes},
-   'maxdepth|m=s' => \$opts->{maxdepth},
-   'links|l=s'    => \$opts->{links},
+   'bytes|b=i'    => \$opts->{bytes},
+   'maxdepth|m=i' => \$opts->{maxdepth},
+   'links|l'      => \$opts->{links},
    'prompt|p'     => \$opts->{prompt},
-   'remove|r'     => \$opts->{remove},
+   'remove|x'     => \$opts->{remove},
    'delete'       => \$opts->{remove}, # <-- that's not a typo
    'help|h|?'     => \$opts->{help},
-   'threads|t=s'  => \$opts->{threads},
+   'threads|t=i'  => \$opts->{threads},
    'format|f=s'   => \$opts->{format},
    'weed|w=s'     => \$opts->{weed},
+   'qsize|q=i'    => \$opts->{qsize},
 ) or die usage();
 
 die usage() unless defined $opts->{dir};
@@ -82,23 +84,17 @@ my $ftl = File::Util->new
    }
 );
 
-$SIG{TERM} = $SIG{INT} = \&end_wait_thread_pool;
+my $benchmarks =
+{
+   scanfs   => { },
+   prune    => { },
+   weed     => { },
+   digest   => { },
+   remove   => { },
+   run      => { },
+};
 
-my
-(
-   $cmp_count,    $size_dup_count,
-   $dup_count,    $scan_time,
-   $prune_time,   $weed_time,
-   $hash_time,    $del_time,
-   $run_time
-) = run();
-
-$weed_time  = $opts->{weed}   ? timestr $weed_time : 'did not weed';
-$del_time   = $opts->{remove} ? timestr $del_time  : 'no deletions';
-$scan_time  = timestr $scan_time;
-$prune_time = timestr $prune_time;
-$hash_time  = timestr $hash_time;
-$run_time   = timestr $run_time;
+my ( $cmp_count, $size_dup_count, $dup_count ) = run();
 
 say <<__SUMMARY__;
 ------------------------------
@@ -107,12 +103,12 @@ say <<__SUMMARY__;
 ** TOTAL SAME SIZE.......$size_dup_count
 ** TOTAL ACTUAL DUPES....$dup_count
       -- TIMES --
-** TREE SCAN TIME........$scan_time
-** HARDLINK PRUNE TIME...$prune_time
-** WEED-OUT TIME.........$weed_time
-** CRYPTO-HASHING TIME...$hash_time
-** DELETION TIME.........$del_time
-** TOTAL RUN TIME........$run_time
+** TREE SCAN TIME........$benchmarks->{scanfs}->{result}
+** HARDLINK PRUNE TIME...$benchmarks->{prune}->{result}
+** WEED-OUT TIME.........$benchmarks->{weed}->{result}
+** CRYPTO-HASHING TIME...$benchmarks->{digest}->{result}
+** DELETION TIME.........$benchmarks->{remove}->{result}
+** TOTAL RUN TIME........$benchmarks->{run}->{result}
 __SUMMARY__
 
 exit;
@@ -121,88 +117,109 @@ exit;
 
 sub run
 {
-   my $start_of_run   = Benchmark->new();
-   my $start_of_scan  = Benchmark->new();
+   bench_this( run => 'start' );
+
+   my ( $size_dups, $cmp_count ) = scanfs();
+
    my $size_dup_count = 0;
+
+   ( $size_dups, $size_dup_count ) = prune_hardlinks( $size_dups );
+
+   $size_dups = weed_out( $size_dups );
+
+   my $digest_dups = digest_the_rest( $size_dups );
+
+   undef $size_dups; # free up some RAM
+
+   say '** DISPLAYING OUTPUT'; say '-' x 30;
+
+   my $dup_count = show_dups( $digest_dups );
+
+   delete_dups( $digest_dups ) if $opts->{remove};
+
+   bench_this( run => 'end' );
+
+   calculate_bench_times();
+
+   return $cmp_count, $size_dup_count, $dup_count;
+
+}
+
+sub scanfs
+{
+   bench_this( scanfs => 'start' );
 
    say '** SCANNING ALL FILES FOR SIZE DUPLICATES';
 
    my ( $sizes, $cmp_count ) = get_dup_sizes();
 
-   my $end_of_scan = Benchmark->new();
+   bench_this( scanfs => 'end' );
 
    say '** NO DUPLICATES FOUND' and exit unless keys %$sizes;
 
+   return $sizes, $cmp_count
+}
+
+sub prune_hardlinks
+{
+   my $size_dups = shift;
 
    say '** PRUNING HARD LINKS';
 
-   my $start_of_prune = Benchmark->new();
+   bench_this( prune => 'start' );
 
-   $sizes = toss_out_hardlinks( $sizes );
+   $size_dups = toss_out_hardlinks( $size_dups );
 
-   # you have to do this for this threaded version of dupfind, and it has to
-   # happen after you've already pruned out the hardlinks (above)
+   # you have to do this for this threaded version of dupfind, and it has
+   # to happen after you've already pruned out the hardlinks (above)
    {
-      $hashes->{'zero size'} = &shared_clone( $sizes->{0} ) if ref $sizes->{0};
+      $digests->{'zero size'} = &shared_clone( $size_dups->{0} )
+         if ref $size_dups->{0};
 
-      delete $sizes->{0};
+      delete $size_dups->{0};
    }
 
-   $size_dup_count = keys %$sizes;
+   my $size_dups_count = keys %$size_dups;
 
-   my $end_of_prune = Benchmark->new();
+   bench_this( prune => 'end' );
 
-   say '** NO DUPLICATES FOUND' and exit unless keys %$sizes;
+   say '** NO DUPLICATES FOUND' and exit unless $size_dups_count;
 
+   return $size_dups, $size_dups_count;
+}
 
-   say '** WEEDING-OUT FILES THAT ARE OBVIOUSLY DIFFERENT' if $opts->{weed};
+sub weed_out
+{
+   my $size_dups = shift;
 
-   my $start_of_weeding = Benchmark->new();
+   say '** WEEDING-OUT FILES THAT ARE OBVIOUSLY DIFFERENT';
 
-   $sizes = remove_obviously_different( $sizes ) if $opts->{weed};
+   bench_this( weed => 'start' );
 
-   my $end_of_weeding = Benchmark->new();
+   $size_dups = remove_obviously_different( $size_dups );
 
-   say '** NO DUPLICATES FOUND' and exit unless $size_dup_count;
+   bench_this( weed => 'end' );
 
+   say '** NO DUPLICATES FOUND' and exit unless keys %$size_dups;
+
+   return $size_dups;
+}
+
+sub digest_the_rest
+{
+   my $size_dups = shift;
 
    say '** CHECKSUMMING SIZE DUPLICATES';
 
-   my $start_of_hashing = Benchmark->new();
+   bench_this( digest => 'start' );
 
-   my $hashes = get_dup_hashes( $sizes );
+   my $digest_dups = get_dup_digests( $size_dups );
 
-   my $end_of_hashing = Benchmark->new();
+   bench_this( digest => 'end' );
 
-   undef $sizes; # free up some RAM
+   say '** NO DUPLICATES FOUND' and exit unless keys %$digest_dups;
 
-   say '** NO DUPLICATES FOUND' and exit unless keys %$hashes;
-
-
-   say '** DISPLAYING OUTPUT';
-
-   say '-' x 30;
-
-   my $dup_count  = show_dups( $hashes );
-
-   my $start_of_del = Benchmark->new();
-
-   delete_dups( $hashes ) if $opts->{remove};
-
-   my $end_of_del = Benchmark->new();
-
-   my $end_of_run   = Benchmark->new();
-
-   return $cmp_count,
-          $size_dup_count,
-          $dup_count,
-          timediff( $end_of_scan,    $start_of_scan    ),
-          timediff( $end_of_prune,   $start_of_prune   ),
-          timediff( $end_of_weeding, $start_of_weeding ),
-          timediff( $end_of_hashing, $start_of_hashing ),
-          timediff( $end_of_del,     $start_of_del     ),
-          timediff( $end_of_run,     $start_of_run     );
-
+   return $digest_dups;
 }
 
 sub create_thread_pool
@@ -241,8 +258,6 @@ sub worker
 
    while ( !$thread_term )
    {
-      #say "Thread $tid is idle";
-
       # signal to the thread poolq that we are ready to work
 
       $pool_queue->enqueue( $tid );
@@ -251,10 +266,7 @@ sub worker
 
       my $file = $work_queue->dequeue;
 
-      #say "Thread $tid ended" and
-         last unless defined $file;
-
-      #say "Thread $tid just got a hashing job: $file";
+      last unless defined $file;
 
       open my $fh, '<', $file or next;
 
@@ -262,15 +274,13 @@ sub worker
 
       close $fh;
 
-      my $hash = xxhash_hex $data, 0;
+      my $digest = xxhash_hex $data, 0;
 
-      lock $hashes;
+      lock $digests;
 
-      $hashes->{ $hash } ||= &share( [] );
+      $digests->{ $digest } ||= &share( [] );
 
-      push @{ $hashes->{ $hash } }, $file;
-
-      #say "Thread $tid is done hashing: $file";
+      push @{ $digests->{ $digest } }, $file;
    }
 }
 
@@ -390,23 +400,37 @@ sub get_dup_sizes
    return $sizes, $cmp_count;
 }
 
-sub get_dup_hashes
+sub get_dup_digests
 {
    my $sizes  = shift;
+   my $queued = 0;
 
    create_thread_pool();
 
-   for my $size ( keys %$sizes )
+   sub get_tid
+   {
+      my $tid = $pool_queue->dequeue;
+
+      say 'TID IS ' . $tid;
+
+      return $tid;
+   }
+
+   my $tid = get_tid();
+
+   SIZESCAN: for my $size ( keys %$sizes )
    {
       my $group = $sizes->{ $size };
 
       for my $file ( @$group )
       {
-         my $tid = $pool_queue->dequeue;
-
-         last unless defined $tid;
-
          $worker_queues->{ $tid }->enqueue( $file ) if !$thread_term;
+
+         $queued++;
+
+         $tid = get_tid() and $queued = 0 if $queued == $opts->{qsize} - 1;
+
+         last SIZESCAN unless defined $tid;
       }
    }
 
@@ -415,28 +439,28 @@ sub get_dup_hashes
    end_wait_thread_pool();
 
    # get rid of non-dupes
-   delete $hashes->{ $_ }
-      for grep { @{ $hashes->{ $_ } } == 1 }
-      keys %$hashes;
+   delete $digests->{ $_ }
+      for grep { @{ $digests->{ $_ } } == 1 }
+      keys %$digests;
 
-   my $priv_hashes = {};
+   my $priv_digests = {};
 
    # sort dup groupings
-   for my $hash ( keys %$hashes )
+   for my $hash ( keys %$digests )
    {
-      my @group = @{ $hashes->{ $hash } };
+      my @group = @{ $digests->{ $hash } };
 
-      $priv_hashes->{ $hash } = [ sort { $a cmp $b } @group ];
+      $priv_digests->{ $hash } = [ sort { $a cmp $b } @group ];
    }
 
-   undef $hashes;
+   undef $digests;
 
-   return $priv_hashes;
+   return $priv_digests;
 }
 
 sub show_dups
 {
-   my $hashes = shift;
+   my $digests = shift;
    my $dupes  = 0;
 
    my $for_humans = sub # human-readable output
@@ -461,10 +485,10 @@ sub show_dups
 
    for my $hash
    (
-      sort { $hashes->{ $a }->[0] cmp $hashes->{ $b }->[0] } keys %$hashes
+      sort { $digests->{ $a }->[0] cmp $digests->{ $b }->[0] } keys %$digests
    )
    {
-      my $files = $hashes->{ $hash };
+      my $files = $digests->{ $hash };
 
       $formatter->( $hash => $files );
 
@@ -476,13 +500,15 @@ sub show_dups
 
 sub delete_dups
 {
-   my $hashes  = shift;
+   my $digests = shift;
+
+   bench_this( remove => 'start' );
 
    my $removed = 0;
 
-   for my $hash ( keys %$hashes )
+   for my $hash ( keys %$digests )
    {
-      my $group = $hashes->{ $hash };
+      my $group = $digests->{ $hash };
 
       say sprintf 'KEPT    (%s) %s', $hash, $group->[0];
 
@@ -510,7 +536,34 @@ sub delete_dups
       say '--';
    }
 
-   say "** TOTAL DUPLICATE FILES REMOVED: $removed"
+   say "** TOTAL DUPLICATE FILES REMOVED: $removed";
+
+   bench_this( remove => 'end' );
+}
+
+sub bench_this
+{
+   my ( $mark, $start_end ) = @_;
+
+   $benchmarks->{ $mark }->{ $start_end } = Benchmark->new();
+}
+
+sub calculate_bench_times
+{
+   for my $mark ( keys %$benchmarks )
+   {
+      next unless $benchmarks->{ $mark }->{start};
+
+      $benchmarks->{ $mark }->{result} =
+         timestr timediff
+         (
+            $benchmarks->{ $mark }->{end},
+            $benchmarks->{ $mark }->{start}
+         );
+   }
+
+   $benchmarks->{weed}->{result}   ||= 'did not weed';
+   $benchmarks->{remove}->{result} ||= 'no deletions';
 }
 
 # This is just the help message:
@@ -518,6 +571,9 @@ sub delete_dups
 sub usage { <<'__USAGE__' }
 USAGE:
    dupfind [ --options ] --dir ./path/to/search/
+
+EXAMPLE:
+   dupfind --threads 4 --format robot --maxdepth 100 --bytes 1099511627776 --dir /dedup
 
 DESCRIPTION:
    finds duplicate files in a directory tree.  Options are explained
@@ -546,13 +602,16 @@ ARGUMENTS AND FLAGS:
 
    -m, --maxdepth The maximum directory depth to which the comparison
                   scan will recurse.  Note that this does not mean the
-                  total number of directories to scan
+                  total number of directories to scan.
 
    -p, --prompt   Interactively prompt user to delete detected duplicates
 
-   -r, --remove   Delete (WITHOUT PROMPTING) all but the first copy if
+   -q, --qsize    Number of files each thread should process at a time. The
+                  the default is 30.
+
+   -x, --remove   Delete (WITHOUT PROMPTING) all but the first copy if
                   duplicate files are found.  This will leave you with no
-                  duplicate files when execution is finished
+                  duplicate files when execution is finished.
 
    -t, --threads  Number of threads to use for file comparisons.  Defaults
                   to 10, but lower numbers will do better on systems with
