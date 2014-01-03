@@ -95,13 +95,11 @@ sub run
 
    my ( $size_dups, $scan_count, $size_dup_count ) = scanfs();
 
-   ( $size_dups, $size_dup_count ) =
-      prune_hardlinks( $size_dups => $size_dup_count );
+   $size_dups = prune_hardlinks( $size_dups );
 
-   ( $size_dups, $size_dup_count ) =
-      weed_out( $size_dups => $size_dup_count );
+   $size_dups = weed_out( $size_dups );
 
-   my $digest_dups = digest_the_rest( $size_dups => $size_dup_count );
+   my $digest_dups = digest_the_rest( $size_dups );
 
    undef $size_dups; # free up some RAM
 
@@ -116,7 +114,6 @@ sub run
    calculate_bench_times();
 
    return $scan_count, $size_dup_count, $dup_count;
-
 }
 
 sub scanfs
@@ -136,48 +133,47 @@ sub scanfs
 
 sub prune_hardlinks
 {
-   my ( $size_dups, $size_dup_count ) = @_;
+   my $size_dups = shift;
 
    say '** PRUNING HARD LINKS';
 
    bench_this( prune => 'start' );
 
-   ( $size_dups, $size_dup_count ) = toss_out_hardlinks( $size_dups );
+   $size_dups = toss_out_hardlinks( $size_dups );
 
    bench_this( prune => 'end' );
 
    say '** NO DUPLICATES FOUND' and exit unless keys %$size_dups;
 
-   return $size_dups, $size_dup_count;
+   return $size_dups;
 }
 
 sub weed_out
 {
-   my ( $size_dups, $size_dup_count ) = @_;
+   my $size_dups = shift;
 
    say '** WEEDING-OUT FILES THAT ARE OBVIOUSLY DIFFERENT';
 
    bench_this( weed => 'start' );
 
-   ( $size_dups, $size_dup_count ) =
-      remove_obviously_different( $size_dups => $size_dup_count );
+   $size_dups = remove_obviously_different( $size_dups );
 
    bench_this( weed => 'end' );
 
    say '** NO DUPLICATES FOUND' and exit unless keys %$size_dups;
 
-   return $size_dups, $size_dup_count;
+   return $size_dups;
 }
 
 sub digest_the_rest
 {
-   my ( $size_dups, $size_dup_count ) = @_;
+   my $size_dups = shift;
 
    say '** CHECKSUMMING SIZE DUPLICATES';
 
    bench_this( digest => 'start' );
 
-   my $digest_dups = get_dup_digests( $size_dups => $size_dup_count );
+   my $digest_dups = get_dup_digests( $size_dups );
 
    bench_this( digest => 'end' );
 
@@ -191,13 +187,17 @@ sub remove_obviously_different
    # weed out files that are obviously different, based on the last
    # few bytes in the file.  This saves us from unnecessary hashing
 
-   my ( $size_dups, $size_dup_count ) = @_;
+   my $size_dups    = shift;
    my $zero_sized   = delete $size_dups->{0};
+   my $dup_count    = 0;
+
+   $dup_count += @$_ for map { $size_dups->{ $_ } } keys %$size_dups;
+
    my $progress_bar = Term::ProgressBar->new
       (
          {
             name   => '   ...FIRST PASS',
-            count  => $size_dup_count,
+            count  => $dup_count,
             remove => 1,
          }
       );
@@ -215,6 +215,8 @@ sub remove_obviously_different
          my $first_bytes = get_file_first_bytes( $file => $same_size );
 
          push @{ $same_first_bytes->{ $first_bytes } }, $file;
+
+         $progress_bar->update( $i++ );
       }
 
       # delete obvious non-dupe files from the group of same-size files
@@ -232,11 +234,13 @@ sub remove_obviously_different
       push @{ $size_dups->{ $same_size } },
          map { @{ $same_first_bytes->{ $_ } } }
          keys %$same_first_bytes;
-
-      $progress_bar->update( $i ) if $i++ % 10 == 0;
    }
 
    $progress_bar->update( $i );
+
+   undef $dup_count;
+
+   $dup_count += @$_ for map { $size_dups->{ $_ } } keys %$size_dups;
 
    $i = 0; # reset
 
@@ -244,14 +248,14 @@ sub remove_obviously_different
       (
          {
             name   => '   ...SECOND PASS',
-            count  => scalar keys %$size_dups,
+            count  => $dup_count,
             remove => 1,
          }
       );
 
    for my $same_size ( keys %$size_dups )
    {
-      my @group = sort { $a cmp $b } @{ $size_dups->{ $same_size } };
+      my @group = @{ $size_dups->{ $same_size } };
 
       my $same_last_bytes = {};
 
@@ -260,6 +264,8 @@ sub remove_obviously_different
          my $last_bytes = get_file_last_bytes( $file => $same_size );
 
          push @{ $same_last_bytes->{ $last_bytes } }, $file;
+
+         $progress_bar->update( $i++ );
       }
 
       # delete obvious non-dupe files from the group of same-size files
@@ -277,19 +283,13 @@ sub remove_obviously_different
       push @{ $size_dups->{ $same_size } },
          map { @{ $same_last_bytes->{ $_ } } }
          keys %$same_last_bytes;
-
-      $progress_bar->update( $i ) if $i++ % 10 == 0;
    }
 
    $progress_bar->update( $i );
 
    $size_dups->{0} = $zero_sized if ref $zero_sized;
 
-   undef $size_dup_count;
-
-   $size_dup_count += @$_ for map { $size_dups->{ $_ } } keys %$size_dups;
-
-   return $size_dups, $size_dup_count;
+   return $size_dups;
 }
 
 sub get_file_first_bytes
@@ -330,7 +330,7 @@ sub get_file_last_bytes
 
 sub toss_out_hardlinks
 {
-   my ( $size_dups, $size_dup_count ) = @_;
+   my $size_dups = shift;
 
    for my $size ( keys %$size_dups )
    {
@@ -351,11 +351,7 @@ sub toss_out_hardlinks
       }
    }
 
-   undef $size_dup_count;
-
-   $size_dup_count += @$_ for map { $size_dups->{ $_ } } keys %$size_dups;
-
-   return $size_dups, $size_dup_count;
+   return $size_dups;
 }
 
 sub get_size_dups
@@ -390,14 +386,18 @@ sub get_size_dups
 
 sub get_dup_digests
 {
-   my ( $size_dups, $size_dup_count ) = @_;
+   my $size_dups = shift;
    my $digests   = {};
+   my $dup_count = 0;
    my $prgs_iter = 0;
+
+   $dup_count += @$_ for map { $size_dups->{ $_ } } keys %$size_dups;
+
    my $progress  = Term::ProgressBar->new
       (
          {
             name   => '   ...PROGRESS',
-            count  => $size_dup_count,
+            count  => $dup_count,
             remove => 1,
          }
       );
@@ -438,7 +438,7 @@ sub get_dup_digests
       $priv_digests->{ $digest } = [ sort { $a cmp $b } @group ];
    }
 
-   $progress->update( $size_dup_count );
+   $progress->update( $dup_count );
 
    undef $digests;
 
@@ -559,6 +559,9 @@ sub usage { <<'__USAGE__' }
 USAGE:
    dupfind [ --options ] --dir ./path/to/search/
 
+EXAMPLE:
+   dupfind --format robot --maxdepth 100 --bytes 1099511627776 --dir /dedup
+
 DESCRIPTION:
    finds duplicate files in a directory tree.  Options are explained
    in detail below.  Options marked with an asterisk (*) are not yet
@@ -586,13 +589,13 @@ ARGUMENTS AND FLAGS:
 
    -m, --maxdepth The maximum directory depth to which the comparison
                   scan will recurse.  Note that this does not mean the
-                  total number of directories to scan
+                  total number of directories to scan.
 
    -p, --prompt   Interactively prompt user to delete detected duplicates
 
    -x, --remove   Delete (WITHOUT PROMPTING) all but the first copy if
                   duplicate files are found.  This will leave you with no
-                  duplicate files when execution is finished
+                  duplicate files when execution is finished.
 
    -w, --weed     Either yes or no.  (Default yes).  Tries to avoid unnecessary
                   file hashing by weeding out potential duplicates with a
