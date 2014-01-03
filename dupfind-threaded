@@ -24,7 +24,7 @@ use threads::shared;
 use Thread::Queue;
 
 my $digests = &share( {} ); # shared between threads, so we put this right up top
-my $d_iter  :shared;
+my $d_counter :shared = 0;
 
 use File::Util;
 use Digest::xxHash 'xxhash_hex';
@@ -97,12 +97,12 @@ my $benchmarks =
    run      => { },
 };
 
-my ( $cmp_count, $size_dup_count, $dup_count ) = run();
+my ( $scan_count, $size_dup_count, $dup_count ) = run();
 
 say <<__SUMMARY__;
 ------------------------------
 ** THREADS...............$opts->{threads}
-** TOTAL FILES SCANNED...$cmp_count
+** TOTAL FILES SCANNED...$scan_count
 ** TOTAL SAME SIZE.......$size_dup_count
 ** TOTAL ACTUAL DUPES....$dup_count
       -- TIMES --
@@ -122,15 +122,15 @@ sub run
 {
    bench_this( run => 'start' );
 
-   my ( $size_dups, $cmp_count ) = scanfs();
+   my ( $size_dups, $scan_count, $size_dup_count ) = scanfs();
 
-   my $size_dup_count = 0;
+   ( $size_dups, $size_dup_count ) =
+      prune_hardlinks( $size_dups => $size_dup_count );
 
-   ( $size_dups, $size_dup_count ) = prune_hardlinks( $size_dups );
+   ( $size_dups, $size_dup_count ) =
+      weed_out( $size_dups => $size_dup_count );
 
-   $size_dups = weed_out( $size_dups );
-
-   my $digest_dups = digest_the_rest( $size_dups );
+   my $digest_dups = digest_the_rest( $size_dups => $size_dup_count );
 
    undef $size_dups; # free up some RAM
 
@@ -144,7 +144,7 @@ sub run
 
    calculate_bench_times();
 
-   return $cmp_count, $size_dup_count, $dup_count;
+   return $scan_count, $size_dup_count, $dup_count;
 
 }
 
@@ -154,24 +154,24 @@ sub scanfs
 
    say '** SCANNING ALL FILES FOR SIZE DUPLICATES';
 
-   my ( $sizes, $cmp_count ) = get_dup_sizes();
+   my ( $size_dups, $scan_count, $size_dup_count ) = get_size_dups();
 
    bench_this( scanfs => 'end' );
 
-   say '** NO DUPLICATES FOUND' and exit unless keys %$sizes;
+   say '** NO DUPLICATES FOUND' and exit unless keys %$size_dups;
 
-   return $sizes, $cmp_count
+   return $size_dups, $scan_count, $size_dup_count;
 }
 
 sub prune_hardlinks
 {
-   my $size_dups = shift;
+   my ( $size_dups, $size_dup_count ) = @_;
 
    say '** PRUNING HARD LINKS';
 
    bench_this( prune => 'start' );
 
-   $size_dups = toss_out_hardlinks( $size_dups );
+   ( $size_dups, $size_dup_count ) = toss_out_hardlinks( $size_dups );
 
    # you have to do this for this threaded version of dupfind, and it has
    # to happen after you've already pruned out the hardlinks (above)
@@ -182,41 +182,40 @@ sub prune_hardlinks
       delete $size_dups->{0};
    }
 
-   my $size_dups_count = keys %$size_dups;
-
    bench_this( prune => 'end' );
 
-   say '** NO DUPLICATES FOUND' and exit unless $size_dups_count;
+   say '** NO DUPLICATES FOUND' and exit unless keys %$size_dups;
 
-   return $size_dups, $size_dups_count;
+   return $size_dups, $size_dup_count;
 }
 
 sub weed_out
 {
-   my $size_dups = shift;
+   my ( $size_dups, $size_dup_count ) = @_;
 
    say '** WEEDING-OUT FILES THAT ARE OBVIOUSLY DIFFERENT';
 
    bench_this( weed => 'start' );
 
-   $size_dups = remove_obviously_different( $size_dups );
+   ( $size_dups, $size_dup_count ) =
+      remove_obviously_different( $size_dups => $size_dup_count );
 
    bench_this( weed => 'end' );
 
    say '** NO DUPLICATES FOUND' and exit unless keys %$size_dups;
 
-   return $size_dups;
+   return $size_dups, $size_dup_count;
 }
 
 sub digest_the_rest
 {
-   my $size_dups = shift;
+   my ( $size_dups, $size_dup_count ) = @_;
 
    say '** CHECKSUMMING SIZE DUPLICATES';
 
    bench_this( digest => 'start' );
 
-   my $digest_dups = get_dup_digests( $size_dups );
+   my $digest_dups = get_dup_digests( $size_dups => $size_dup_count );
 
    bench_this( digest => 'end' );
 
@@ -259,11 +258,13 @@ sub end_wait_thread_pool
 sub threads_progress
 {
    my $files_to_digest  = shift;
+   my $last_update      = 0;
    my $threads_progress = Term::ProgressBar->new
       (
          {
             name   => '   ...PROGRESS',
             count  => $files_to_digest,
+            remove => 1,
          }
       );
 
@@ -271,7 +272,10 @@ sub threads_progress
    {
       usleep 1000; # sleep for 1 millisecond
 
-      $threads_progress->update( $d_iter );
+      $threads_progress->update( $d_counter )
+         if $d_counter > $last_update;
+
+      $last_update = $d_counter;
    }
 
    $threads_progress->update( $files_to_digest );
@@ -284,7 +288,7 @@ sub worker
 
    local $/;
 
-   while ( !$thread_term )
+   WORKER: while ( !$thread_term )
    {
       # signal to the thread poolq that we are ready to work
 
@@ -296,7 +300,7 @@ sub worker
 
       last unless defined $file;
 
-      open my $fh, '<', $file or next;
+      open my $fh, '<', $file or do { lock $d_counter; $d_counter++; next WORKER };
 
       my $data = <$fh>;
 
@@ -310,7 +314,9 @@ sub worker
 
       push @{ $digests->{ $digest } }, $file;
 
-      lock $d_iter; $d_iter++
+      #warn "$tid incrementing d_counter ($d_counter) for $file !!";
+
+      lock $d_counter; $d_counter++;
    }
 }
 
@@ -319,13 +325,13 @@ sub remove_obviously_different
    # weed out files that are obviously different, based on the last
    # few bytes in the file.  This saves us from unnecessary hashing
 
-   my $size_dups    = shift;
+   my ( $size_dups, $size_dup_count ) = @_;
    my $zero_sized   = delete $size_dups->{0};
    my $progress_bar = Term::ProgressBar->new
       (
          {
             name   => '   ...FIRST PASS',
-            count  => scalar keys %$size_dups,
+            count  => $size_dup_count,
             remove => 1,
          }
       );
@@ -361,6 +367,7 @@ sub remove_obviously_different
          map { @{ $same_first_bytes->{ $_ } } }
          keys %$same_first_bytes;
 
+      # update the progress bar, but not too often, just every 10 iterations
       $progress_bar->update( $i ) if $i++ % 10 == 0;
    }
 
@@ -413,7 +420,11 @@ sub remove_obviously_different
 
    $size_dups->{0} = $zero_sized if ref $zero_sized;
 
-   return $size_dups;
+   undef $size_dup_count;
+
+   $size_dup_count += @$_ for map { $size_dups->{ $_ } } keys %$size_dups;
+
+   return $size_dups, $size_dup_count;
 }
 
 sub get_file_first_bytes
@@ -454,7 +465,7 @@ sub get_file_last_bytes
 
 sub toss_out_hardlinks
 {
-   my $size_dups = shift;
+   my ( $size_dups, $size_dup_count ) = @_;
 
    for my $size ( keys %$size_dups )
    {
@@ -475,12 +486,16 @@ sub toss_out_hardlinks
       }
    }
 
-   return $size_dups;
+   undef $size_dup_count;
+
+   $size_dup_count += @$_ for map { $size_dups->{ $_ } } keys %$size_dups;
+
+   return $size_dups, $size_dup_count;
 }
 
-sub get_dup_sizes
+sub get_size_dups
 {
-   my ( $sizes, $cmp_count ) = ( {}, 0 );
+   my ( $size_dups, $scan_count, $size_dup_count ) = ( {}, 0, 0 );
 
    $ftl->list_dir
    (
@@ -491,30 +506,32 @@ sub get_dup_sizes
             {
                my ( $selfdir, $subdirs, $files ) = @_;
 
-               push @{ $sizes->{ -s $_ } }, $_
+               $scan_count += @$files;
+
+               push @{ $size_dups->{ -s $_ } }, $_
                   for grep { !-l $_ && defined -s $_ } @$files;
             }
       }
    );
 
-   $cmp_count = keys %$sizes;
+   delete $size_dups->{ $_ }
+      for grep { @{ $size_dups->{ $_ } } == 1 }
+      keys %$size_dups;
 
-   delete $sizes->{ $_ }
-      for grep { @{ $sizes->{ $_ } } == 1 }
-      keys %$sizes;
+   $size_dup_count += @$_ for map { $size_dups->{ $_ } } keys %$size_dups;
 
-   return $sizes, $cmp_count;
+   return $size_dups, $scan_count, $size_dup_count;
 }
 
 sub get_dup_digests
 {
-   my $sizes  = shift;
+   my ( $size_dups, $size_dup_count ) = @_;
    my $queued = 0;
 
    # creates thread pool, passing in as an argument the number of files
    # that the pool needs to digest.  this is NOT equivalent to the number
    # of threads to be created; that is determined in the options ($opts)
-   create_thread_pool( scalar keys %$sizes );
+   create_thread_pool( $size_dup_count );
 
    sub get_tid
    {
@@ -525,9 +542,9 @@ sub get_dup_digests
 
    my $tid = get_tid();
 
-   SIZESCAN: for my $size ( keys %$sizes )
+   SIZESCAN: for my $size ( keys %$size_dups )
    {
-      my $group = $sizes->{ $size };
+      my $group = $size_dups->{ $size };
 
       for my $file ( @$group )
       {
@@ -541,10 +558,8 @@ sub get_dup_digests
       }
    }
 
-   my $files_to_digest = ( scalar keys %$sizes ) - 1;
-
    # wait for threads to finish
-   while ( $d_iter < $files_to_digest )
+   while ( $d_counter < $size_dup_count )
    {
       usleep 1000; # sleep for 1 millisecond
    }
@@ -581,7 +596,7 @@ sub show_dups
    {
       my ( $hash, $files ) = @_;
 
-      say sprintf 'DUPLICATES (hash: %s | size: %db)', $hash, -s $$files[0];
+      say sprintf 'DUPLICATES (digest: %s | size: %db)', $hash, -s $$files[0];
 
       say "   $_" for @$files;
 
