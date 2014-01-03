@@ -12,12 +12,12 @@ data spanning anywhere between 5K and 37K files
 
 =cut
 
+use strict;
+use warnings;
+
 use 5.010;
 
 BEGIN { $|++; $SIG{TERM} = $SIG{INT} = \&end_wait_thread_pool; }
-
-use warnings;
-use strict;
 
 use threads;
 use threads::shared;
