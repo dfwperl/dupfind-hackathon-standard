@@ -24,11 +24,14 @@ use threads::shared;
 use Thread::Queue;
 
 my $digests = &share( {} ); # shared between threads, so we put this right up top
+my $d_iter  :shared;
 
 use File::Util;
 use Digest::xxHash 'xxhash_hex';
 use Getopt::Long;
 use Term::Prompt 'prompt';
+use Term::ProgressBar;
+use Time::HiRes 'usleep';
 use Benchmark ':hireswallclock';
 
 my $opts =
@@ -224,6 +227,10 @@ sub digest_the_rest
 
 sub create_thread_pool
 {
+   my $files_to_digest = shift;
+
+   threads->create( threads_progress => $files_to_digest );
+
    for ( 1 .. $opts->{threads} )
    {
       my $thread_queue  = Thread::Queue->new;
@@ -247,6 +254,27 @@ sub end_wait_thread_pool
    $pool_queue->end;
 
    $_->join for threads->list;
+}
+
+sub threads_progress
+{
+   my $files_to_digest  = shift;
+   my $threads_progress = Term::ProgressBar->new
+      (
+         {
+            name   => '   ...PROGRESS',
+            count  => $files_to_digest,
+         }
+      );
+
+   while ( !$thread_term )
+   {
+      usleep 1000; # sleep for 1 millisecond
+
+      $threads_progress->update( $d_iter );
+   }
+
+   $threads_progress->update( $files_to_digest );
 }
 
 sub worker
@@ -281,6 +309,8 @@ sub worker
       $digests->{ $digest } ||= &share( [] );
 
       push @{ $digests->{ $digest } }, $file;
+
+      lock $d_iter; $d_iter++
    }
 }
 
@@ -289,18 +319,73 @@ sub remove_obviously_different
    # weed out files that are obviously different, based on the last
    # few bytes in the file.  This saves us from unnecessary hashing
 
-   my $size_matches = shift;
-   my $zero_sized   = delete $size_matches->{0};
+   my $size_dups    = shift;
+   my $zero_sized   = delete $size_dups->{0};
+   my $progress_bar = Term::ProgressBar->new
+      (
+         {
+            name   => '   ...FIRST PASS',
+            count  => scalar keys %$size_dups,
+            remove => 1,
+         }
+      );
 
-   for my $same_size ( keys %$size_matches )
+   my $i = 0;
+
+   for my $same_size ( keys %$size_dups )
    {
-      my @group = sort { $a cmp $b } @{ $size_matches->{ $same_size } };
+      my @group = sort { $a cmp $b } @{ $size_dups->{ $same_size } };
+
+      my $same_first_bytes = {};
+
+      for my $file ( @group )
+      {
+         my $first_bytes = get_file_first_bytes( $file => $same_size );
+
+         push @{ $same_first_bytes->{ $first_bytes } }, $file;
+      }
+
+      # delete obvious non-dupe files from the group of same-size files
+      # by virtue of the fact that they will be a single length arrayref
+
+      delete $same_first_bytes->{ $_ }
+         for grep { @{ $same_first_bytes->{ $_ } } == 1 }
+         keys %$same_first_bytes;
+
+      # recompose the arrayref of filenames for the same-size file grouping
+      # but leave out the files we just weeded out from the group
+
+      $size_dups->{ $same_size } = []; # start fresh
+
+      push @{ $size_dups->{ $same_size } },
+         map { @{ $same_first_bytes->{ $_ } } }
+         keys %$same_first_bytes;
+
+      $progress_bar->update( $i ) if $i++ % 10 == 0;
+   }
+
+   $progress_bar->update( $i );
+
+   $i = 0; # reset
+
+   $progress_bar = Term::ProgressBar->new
+      (
+         {
+            name   => '   ...SECOND PASS',
+            count  => scalar keys %$size_dups,
+            remove => 1,
+         }
+      );
+
+   for my $same_size ( keys %$size_dups )
+   {
+      my @group = sort { $a cmp $b } @{ $size_dups->{ $same_size } };
 
       my $same_last_bytes = {};
 
       for my $file ( @group )
       {
-         my $last_bytes = get_file_lastbytes( $file => $same_size );
+         my $last_bytes = get_file_last_bytes( $file => $same_size );
 
          push @{ $same_last_bytes->{ $last_bytes } }, $file;
       }
@@ -315,19 +400,40 @@ sub remove_obviously_different
       # recompose the arrayref of filenames for the same-size file grouping
       # but leave out the files we just weeded out from the group
 
-      $size_matches->{ $same_size } = []; # start fresh
+      $size_dups->{ $same_size } = []; # start fresh
 
-      push @{ $size_matches->{ $same_size } },
+      push @{ $size_dups->{ $same_size } },
          map { @{ $same_last_bytes->{ $_ } } }
          keys %$same_last_bytes;
+
+      $progress_bar->update( $i ) if $i++ % 10 == 0;
    }
 
-   $size_matches->{0} = $zero_sized if ref $zero_sized;
+   $progress_bar->update( $i );
 
-   return $size_matches;
+   $size_dups->{0} = $zero_sized if ref $zero_sized;
+
+   return $size_dups;
 }
 
-sub get_file_lastbytes
+sub get_file_first_bytes
+{
+   my ( $file, $len ) = @_;
+
+   my $buff;
+
+   sysopen my $fh, $file, 0;
+
+   return unless defined $fh;
+
+   sysread $fh, $buff, 64;
+
+   close $fh or return;
+
+   return $buff;
+}
+
+sub get_file_last_bytes
 {
    my ( $file, $len ) = @_;
 
@@ -405,13 +511,14 @@ sub get_dup_digests
    my $sizes  = shift;
    my $queued = 0;
 
-   create_thread_pool();
+   # creates thread pool, passing in as an argument the number of files
+   # that the pool needs to digest.  this is NOT equivalent to the number
+   # of threads to be created; that is determined in the options ($opts)
+   create_thread_pool( scalar keys %$sizes );
 
    sub get_tid
    {
       my $tid = $pool_queue->dequeue;
-
-      say 'TID IS ' . $tid;
 
       return $tid;
    }
@@ -434,8 +541,15 @@ sub get_dup_digests
       }
    }
 
-   # ...tell the threads to exit, blocking wait
+   my $files_to_digest = ( scalar keys %$sizes ) - 1;
 
+   # wait for threads to finish
+   while ( $d_iter < $files_to_digest )
+   {
+      usleep 1000; # sleep for 1 millisecond
+   }
+
+   # ...tell the threads to exit
    end_wait_thread_pool();
 
    # get rid of non-dupes
