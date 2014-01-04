@@ -11,12 +11,13 @@ my $perl_file = shift @ARGV;
 
 die "Usage: $0 file.pl" unless defined $perl_file;
 
-my $critic = Perl::Critic->new();
+my $violation_score = 0;
 
-my @violations = $critic->critique( $perl_file );
+for my $severity ( 1 .. 5 ) {
+    my $critic = Perl::Critic->new( -severity => $severity );
+    $violation_score += scalar( $critic->critique($perl_file) );
+}
 
-say for @violations;
-
-say scalar @violations, ' total violations';
+say "Violation score: $violation_score";
 
 exit;
