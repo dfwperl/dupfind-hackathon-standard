@@ -18,9 +18,9 @@ solution contained here will no longer be valid until updated.  This
 documentation will be updated to reflect the change when it happens
 as part of the hackathon proceedings.
 
-## AUTHOR
+## AUTHORS
 
-Tommy Butler
+Tommy Butler, Joakim Lagerqvist
 
 ## LICENSE
 
